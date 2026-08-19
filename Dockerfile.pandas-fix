@@ -1,0 +1,50 @@
+FROM maciekwielgosz/segment-any-tree:latest
+
+# The upstream image ships a broken/mixed pandas install: pip metadata reports
+# pandas 1.1.5 but pandas/io/parsers/readers.py on disk is from a newer pandas
+# (>=1.3) that imports DtypeArg from pandas._typing, which the 1.1.5 _typing.py
+# doesn't define. Force a clean, single-version reinstall compatible with the
+# numpy 1.24.4 already present in the final stage.
+RUN python3.8 -m pip install --no-cache-dir --force-reinstall --no-deps pandas==1.5.3
+
+# Each input LAS file here is ~80-90M points; las_to_pandas.py upcasts every
+# dimension to float64 (because gps_time is float64), so a single file can
+# peak at 25-35GB while converting. The upstream n_jobs=4 tries to convert
+# all files concurrently, which OOM-kills workers well before the container's
+# memory limit is even close for anything but tiny inputs. Process files
+# sequentially instead.
+COPY nibio_inference/pipeline_utm2local_parallel.py /home/nibio/mutable-outside-world/nibio_inference/pipeline_utm2local_parallel.py
+
+# pandas_to_ply.py built its structured array via
+# np.array(list(map(tuple, df.to_records())), dtype=...), which boxes every
+# scalar as a Python object (~90M rows x ~14 cols) -- this was the actual
+# ~46GB RSS driver, not the LAS loading step. Casting the record array
+# directly is equivalent (verified) and fully vectorized.
+COPY nibio_inference/pandas_to_ply.py /home/nibio/mutable-outside-world/nibio_inference/pandas_to_ply.py
+
+# Same mixed-install problem as pandas above, this time in scikit-learn: pip
+# metadata reports 1.1.3 but sklearn/metrics/_pairwise_distances_reduction/
+# _dispatcher.py on disk is from a newer scikit-learn (>=1.3, which introduced
+# that subpackage) expecting METRIC_MAPPING64 from the compiled _dist_metrics
+# extension, which is still the 1.1.3 build and doesn't export it. Force a
+# clean, single-version reinstall.
+RUN python3.8 -m pip install --no-cache-dir --force-reinstall --no-deps scikit-learn==1.3.2
+
+# torch_points3d/utils/meanshift_cluster.py ran its per-tile MeanShift calls
+# through multiprocessing.Pool (fork). Forking a process that already has an
+# initialized CUDA context is unsafe and reliably deadlocked eval.py partway
+# through inference: all threads parked in futex_wait_queue_me, GPU idle at
+# P8/~4W, zero forward progress, no error raised. Patched to run sequentially.
+COPY torch_points3d/utils/meanshift_cluster.py /home/nibio/mutable-outside-world/torch_points3d/utils/meanshift_cluster.py
+
+# Force unbuffered stdout/stderr so progress (including tqdm) is actually
+# visible in `docker logs` instead of sitting in a buffer.
+ENV PYTHONUNBUFFERED=1
+
+# Wrap the real entrypoint with a background heartbeat that independently
+# logs GPU state every 30s, so liveness can be confirmed from `docker logs`
+# alone without needing `docker exec` into the container.
+COPY docker_heartbeat_entrypoint.sh /home/nibio/mutable-outside-world/docker_heartbeat_entrypoint.sh
+RUN chmod +x /home/nibio/mutable-outside-world/docker_heartbeat_entrypoint.sh
+
+ENTRYPOINT ["bash", "docker_heartbeat_entrypoint.sh"]

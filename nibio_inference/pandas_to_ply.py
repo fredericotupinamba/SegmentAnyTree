@@ -19,9 +19,13 @@ def pandas_to_ply(csv, csv_file_provided=False, output_file_path=None):
     # Replace spaces in column names with underscores
     df.columns = [col.replace(' ', '_') for col in df.columns]
  
-    # Create a structured numpy array with dtype based on the columns of the DataFrame
+    # Create a structured numpy array with dtype based on the columns of the DataFrame.
+    # Cast the record array directly instead of round-tripping through a Python
+    # list of tuples (list(map(tuple, ...))), which boxes every scalar as a
+    # Python object and was the dominant source of memory use on large point
+    # clouds (tens of GB of object overhead for ~90M rows).
     dtypes = [(col, 'f4') for col in df.columns]
-    data = np.array(list(map(tuple, df.to_records(index=False))), dtype=dtypes)
+    data = df.to_records(index=False).astype(dtypes)
 
     # Create a new PlyElement
     vertex = PlyElement.describe(data, 'vertex')

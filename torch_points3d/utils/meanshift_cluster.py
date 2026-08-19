@@ -3,8 +3,6 @@ import torch
 import torch
 from sklearn.cluster import MeanShift
 import time
-import multiprocessing
-from multiprocessing import Process
 from functools import partial
 def meanshift_cluster(prediction, bandwidth):
     bandwidth = bandwidth #0.6
@@ -48,24 +46,24 @@ def cluster_loop(embed_logits_logits_u, unique_in_batch, label_batch, local_ind,
                 all_clusters.append(sample_embed_logits.cpu().detach().numpy())
                 cluster_type_loop.append(loop_i)
     
-    if unique_in_batch.shape[0]>0:
-        processes=unique_in_batch.shape[0]
-    else:
-        processes=1
-    with multiprocessing.Pool(processes=processes) as pool:
-        results = pool.map(meanshift_cluster, all_clusters)
-        for i in range(len(results)):
-            pre_ins_labels_embed = results[i]
-            sampleInBatch_local_ind = local_logits[i]
-            loop_i_ = cluster_type_loop[i]
-            unique_preInslabels = torch.unique(pre_ins_labels_embed)
-            for l in unique_preInslabels:
-                if l == -1:
-                    continue
-                label_mask_l = pre_ins_labels_embed == l
-                final_result.append(sampleInBatch_local_ind[label_mask_l])
-                cluster_type.append(loop_i_)
-    
+    # Note: this used to run meanshift_cluster via multiprocessing.Pool (fork),
+    # but forking a process that already has an initialized CUDA context is
+    # unsafe and reliably deadlocked the eval run (all threads parked in
+    # futex_wait_queue_me, GPU idle at P8, no forward progress). Run the
+    # per-cluster MeanShift calls sequentially instead.
+    results = [meanshift_cluster(c) for c in all_clusters]
+    for i in range(len(results)):
+        pre_ins_labels_embed = results[i]
+        sampleInBatch_local_ind = local_logits[i]
+        loop_i_ = cluster_type_loop[i]
+        unique_preInslabels = torch.unique(pre_ins_labels_embed)
+        for l in unique_preInslabels:
+            if l == -1:
+                continue
+            label_mask_l = pre_ins_labels_embed == l
+            final_result.append(sampleInBatch_local_ind[label_mask_l])
+            cluster_type.append(loop_i_)
+
     #print("total time",time.time()-t)
     return final_result, cluster_type
 
@@ -92,33 +90,21 @@ def cluster_single(embed_logits_logits_u, unique_in_batch, label_batch, local_in
             all_clusters.append(sample_embed_logits.cpu().detach().numpy())
             #normalize(sample_embed_logits, axis=0)
     
+    # See note in cluster_loop above: multiprocessing.Pool (fork) after CUDA
+    # init deadlocks under torch/CUDA. Run sequentially instead.
     partial_meanshift_cluster = partial(meanshift_cluster, bandwidth=bandwidth)
-    if unique_in_batch.shape[0]>0:
-        processes=unique_in_batch.shape[0]
-    else:
-        processes=1
-    with multiprocessing.Pool(processes=processes) as pool:
-        results = pool.map(partial_meanshift_cluster, all_clusters)
-        for i in range(len(results)):
-            pre_ins_labels_embed = results[i]
-            sampleInBatch_local_ind = local_logits[i]
-            unique_preInslabels = torch.unique(pre_ins_labels_embed)
-            for l in unique_preInslabels:
-                if l == -1:
-                    continue
-                label_mask_l = pre_ins_labels_embed == l
-                final_result.append(sampleInBatch_local_ind[label_mask_l])
-                cluster_type.append(type)        
-            
-            #pre_ins_labels_embed = hdbscan_cluster(sample_embed_logits)
-            #unique_preInslabels = torch.unique(pre_ins_labels_embed)
-            #for l in unique_preInslabels:
-            #    if l == -1:
-            #        continue
-            #    label_mask_l = pre_ins_labels_embed == l
-            #    all_clusters.append(sampleInBatch_local_ind[label_mask_l])
-            #    cluster_type.append(type)
-                
+    results = [partial_meanshift_cluster(c) for c in all_clusters]
+    for i in range(len(results)):
+        pre_ins_labels_embed = results[i]
+        sampleInBatch_local_ind = local_logits[i]
+        unique_preInslabels = torch.unique(pre_ins_labels_embed)
+        for l in unique_preInslabels:
+            if l == -1:
+                continue
+            label_mask_l = pre_ins_labels_embed == l
+            final_result.append(sampleInBatch_local_ind[label_mask_l])
+            cluster_type.append(type)
+
     #print("total time",time.time()-t)
     return final_result, cluster_type
 
