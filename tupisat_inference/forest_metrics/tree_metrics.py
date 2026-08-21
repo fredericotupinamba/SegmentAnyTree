@@ -4,7 +4,6 @@ import numpy as np
 import pandas as pd
 from scipy.spatial import ConvexHull
 from skimage.measure import CircleModel, ransac
-from sklearn.isotonic import IsotonicRegression
 
 from tupisat_inference.forest_metrics.config import ForestMetricsConfig
 from tupisat_inference.forest_metrics.dtm import DTM
@@ -260,85 +259,62 @@ def compute_taper(tree_xyz: np.ndarray, hag: np.ndarray, max_height_m: float, cf
     return pd.DataFrame(rows, columns=columns)
 
 
-def apply_monotonic_correction(
-    taper_df: pd.DataFrame, dbh_cm: float, dbh_height_m: float, dbh_n_points: int, dbh_cci: float,
-    cfg: ForestMetricsConfig,
-) -> pd.DataFrame:
-    """Adds a diameter_corrected_cm column. A tree's diameter should never
-    increase with height (ignoring base flare, which this ignores as a
-    minor simplification, same as most taper models) -- but a branch, a
-    neighbouring tree's crown, or any other slice with poor angular
-    coverage can produce a diameter that's not just noisy but wildly wrong.
+def apply_monotonic_correction(taper_df: pd.DataFrame, cfg: ForestMetricsConfig) -> pd.DataFrame:
+    """Adds a diameter_corrected_cm column. Walking the taper curve bottom
+    to top, a sample is flagged as physiologically implausible if its
+    diameter exceeds the *smaller* of the last two accepted (not flagged)
+    diameters below it -- a tree's diameter should not increase with
+    height. Using the smaller of the two (rather than their average) is
+    what actually guarantees the corrected curve never increases: an
+    accepted value is by construction <= the accepted value right before
+    it, so the accepted sequence is non-increasing by induction; the
+    average alone doesn't have that property and can let the curve creep
+    upward a little at a time. Flagged samples are replaced by linear
+    interpolation between
+    the nearest accepted samples below and above (extrapolated flat at
+    either end if there's no accepted sample on that side), never by
+    dropping them or folding them into a global fit.
 
-    Only slices with cci >= tree_validation_cci_threshold (the same "is
-    this really a full, well-covered cross-section" bar used for the
-    tree-validity check) are used as *input* to the fit -- a low-CCI slice
-    is not weak evidence to be down-weighted, it is not evidence at all,
-    and including it (even weighted by n_points) can drag the *entire*
-    non-increasing curve toward a bad number, since a garbage slice isn't
-    guaranteed to carry fewer points than a clean one. Verified against
-    real data: a tree with 9 consecutive non-NaN-but-low-CCI slices (0.3-
-    0.68), several with more points than the clean slices below them,
-    pulled the corrected diameter for the entire tree -- including
-    untouched cci=1.0 samples -- to a single flat, physically implausible
-    value.
-
-    A high CCI alone still isn't sufficient, though: it means the circle
-    fit is well-supported by points on its circumference, not that those
-    points are actually this tree's own trunk rather than an overlapping
-    neighbour's crown or stem. Slices above breast height are additionally
-    dropped from the fit if their diameter exceeds DBH by more than
-    max_taper_over_dbh_ratio -- verified against real data where several
-    such slices individually passed the CCI bar but, left in, forced the
-    whole non-increasing curve up to match them (see config.py for the
-    exact numbers).
-
-    Every originally-measured height still gets a corrected value (via the
-    fitted curve's prediction/extrapolation), including the untrusted
-    ones -- they just don't get a vote in shaping that curve.
+    This is deliberately local: a bad run of samples only ever affects
+    itself, never the clean samples around it. An earlier version of this
+    function used a single weighted isotonic regression across the whole
+    curve instead -- verified against real data that this can go wrong
+    badly: a handful of high-height samples with bad measurements (e.g. an
+    overlapping neighbour's crown) dragged the corrected diameter for an
+    *entire* tree, including untouched clean low samples, to a single flat
+    number nowhere near any of the raw measurements.
     """
     taper_df = taper_df.copy()
     taper_df["diameter_corrected_cm"] = np.nan
 
-    valid = taper_df.dropna(subset=["diameter_cm"])
+    valid = taper_df.dropna(subset=["diameter_cm"]).sort_values("height_m")
     if valid.empty:
         return taper_df
 
-    trusted = valid[valid["cci"] >= cfg.tree_validation_cci_threshold]
-    if np.isfinite(dbh_cm):
-        implausible = (trusted["height_m"] > dbh_height_m) & (
-            trusted["diameter_cm"] > dbh_cm * cfg.max_taper_over_dbh_ratio
-        )
-        trusted = trusted[~implausible]
+    heights = valid["height_m"].to_numpy(dtype=float)
+    diameters = valid["diameter_cm"].to_numpy(dtype=float)
 
-    heights = list(trusted["height_m"].values)
-    diameters = list(trusted["diameter_cm"].values)
-    weights = list(trusted["n_points"].values.astype(float))
+    accepted_heights = []
+    accepted_diameters = []
+    flagged = np.zeros(len(heights), dtype=bool)
 
-    if np.isfinite(dbh_cm) and (not np.isfinite(dbh_cci) or dbh_cci >= cfg.tree_validation_cci_threshold):
-        heights.append(dbh_height_m)
-        diameters.append(dbh_cm)
-        weights.append(float(max(dbh_n_points, 1)))
+    for i in range(len(heights)):
+        if len(accepted_diameters) >= 2:
+            reference = min(accepted_diameters[-1], accepted_diameters[-2])
+            if diameters[i] > reference:
+                flagged[i] = True
+        if not flagged[i]:
+            accepted_heights.append(heights[i])
+            accepted_diameters.append(diameters[i])
 
-    if not heights:
-        # No trustworthy slice anywhere on this tree to correct against --
-        # leaving diameter_corrected_cm as NaN here (rather than copying
-        # the raw, untrusted values through) matters: those raw values are
-        # exactly the ones this function exists to not trust, and passing
-        # them through unmodified can reintroduce the non-increasing
-        # violations the rest of the pipeline (volume, visualization)
-        # assumes are already resolved.
-        return taper_df
+    corrected = diameters.copy()
+    if flagged.any() and accepted_diameters:
+        # np.interp extrapolates flat beyond the accepted range, i.e. holds
+        # the nearest accepted diameter at either end of the curve when
+        # there's no accepted sample on that side to interpolate between.
+        corrected[flagged] = np.interp(heights[flagged], accepted_heights, accepted_diameters)
 
-    heights = np.asarray(heights)
-    diameters = np.asarray(diameters)
-    weights = np.asarray(weights)
-    order = np.argsort(heights)
-
-    model = IsotonicRegression(increasing=False, out_of_bounds="clip")
-    model.fit(heights[order], diameters[order], sample_weight=weights[order])
-
-    taper_df.loc[valid.index, "diameter_corrected_cm"] = model.predict(valid["height_m"].values)
+    taper_df.loc[valid.index, "diameter_corrected_cm"] = corrected
     return taper_df
 
 
@@ -401,9 +377,7 @@ def measure_tree(tree_id: int, tree_df: pd.DataFrame, dtm: DTM, cfg: ForestMetri
     # that row itself won't appear in the reported taper.
     sampling_height_m = min(max(commercial_height_m, cfg.tree_validation_height_m), height_m)
     full_taper_df = compute_taper(tree_xyz, hag, sampling_height_m, cfg)
-    full_taper_df = apply_monotonic_correction(
-        full_taper_df, dbh["dbh_cm"], cfg.dbh_height_m, dbh["dbh_n_points"], dbh["dbh_cci"], cfg
-    )
+    full_taper_df = apply_monotonic_correction(full_taper_df, cfg)
 
     taper_df = full_taper_df[full_taper_df["height_m"] <= commercial_height_m].reset_index(drop=True)
     if taper_df.empty or taper_df["diameter_cm"].isna().all():
