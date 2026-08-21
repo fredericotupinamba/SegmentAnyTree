@@ -1,7 +1,7 @@
 import os
 import jaklas
-from nibio_inference.las_to_pandas import las_to_pandas
-from nibio_inference.pandas_to_las import pandas_to_las
+from tupisat_inference.las_to_pandas import las_to_pandas
+from tupisat_inference.pandas_to_las import pandas_to_las
 import argparse
 
 

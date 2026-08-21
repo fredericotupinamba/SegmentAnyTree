@@ -17,7 +17,7 @@ folder_name=$1
 rm tmp_for_merge/*
 
 # kjore merge_inference_results.py for alle resultater
-python3 nibio_inference/merge_inference_results.py -i ~/data/"$folder_name"/results_/ -o tmp_for_merge/merged_results_org.csv
+python3 tupisat_inference/merge_inference_results.py -i ~/data/"$folder_name"/results_/ -o tmp_for_merge/merged_results_org.csv
 # remove the top line
 sed -i '1d' tmp_for_merge/merged_results_org.csv
 
@@ -28,7 +28,7 @@ mv tmp_for_merge/merged_results_org_sorted.csv tmp_for_merge/merged_results_org.
 
 
 # kjore merge_inference_results.py for alle resultater
-python3 nibio_inference/merge_inference_results.py -i ~/data/"$folder_name"/results_1000/ -o tmp_for_merge/merged_results_1000.csv
+python3 tupisat_inference/merge_inference_results.py -i ~/data/"$folder_name"/results_1000/ -o tmp_for_merge/merged_results_1000.csv
 # remove the top line
 sed -i '1d' tmp_for_merge/merged_results_1000.csv
 
@@ -37,7 +37,7 @@ sort -t, -k1,1 tmp_for_merge/merged_results_1000.csv > tmp_for_merge/merged_resu
 mv tmp_for_merge/merged_results_1000_sorted.csv tmp_for_merge/merged_results_1000.csv
 
 # kjore merge_inference_results.py for alle resultater
-python3 nibio_inference/merge_inference_results.py -i ~/data/"$folder_name"/results_500/ -o tmp_for_merge/merged_results_500.csv
+python3 tupisat_inference/merge_inference_results.py -i ~/data/"$folder_name"/results_500/ -o tmp_for_merge/merged_results_500.csv
 # remove the top line
 sed -i '1d' tmp_for_merge/merged_results_500.csv
 
@@ -46,7 +46,7 @@ sort -t, -k1,1 tmp_for_merge/merged_results_500.csv > tmp_for_merge/merged_resul
 mv tmp_for_merge/merged_results_500_sorted.csv tmp_for_merge/merged_results_500.csv
 
 # kjore merge_inference_results.py for alle resultater
-python3 nibio_inference/merge_inference_results.py -i ~/data/"$folder_name"/results_100/ -o tmp_for_merge/merged_results_100.csv
+python3 tupisat_inference/merge_inference_results.py -i ~/data/"$folder_name"/results_100/ -o tmp_for_merge/merged_results_100.csv
 # remove the top line
 sed -i '1d' tmp_for_merge/merged_results_100.csv
 
@@ -55,7 +55,7 @@ sort -t, -k1,1 tmp_for_merge/merged_results_100.csv > tmp_for_merge/merged_resul
 mv tmp_for_merge/merged_results_100_sorted.csv tmp_for_merge/merged_results_100.csv
 
 # kjore merge_inference_results.py for alle resultater
-python3 nibio_inference/merge_inference_results.py -i ~/data/"$folder_name"/results_10/ -o tmp_for_merge/merged_results_10.csv
+python3 tupisat_inference/merge_inference_results.py -i ~/data/"$folder_name"/results_10/ -o tmp_for_merge/merged_results_10.csv
 # remove the top line
 sed -i '1d' tmp_for_merge/merged_results_10.csv
 

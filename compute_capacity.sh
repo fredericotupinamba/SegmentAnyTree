@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # Base directories
-BASE_DIR=/home/nibio/data/timing_check
+BASE_DIR=/home/tupisat/data/timing_check
 
 # Plot names
 declare -a PLOTS=("austrian_plot" "english_plot" "for_instance_no_outer" "german_plot" "mls")

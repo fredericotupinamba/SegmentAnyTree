@@ -7,7 +7,7 @@ import laspy
 import pandas as pd  # Import pandas
 from tqdm import tqdm
 
-from nibio_sparsify.sparsify_las_based_sq_m import SparsifyLasBasedSqM
+from tupisat_sparsify.sparsify_las_based_sq_m import SparsifyLasBasedSqM
 
 class SparsifyLasBasedSqMInFolder(SparsifyLasBasedSqM):
     def __init__(self, input_folder, output_folder=None, target_density=10, verbose=False):

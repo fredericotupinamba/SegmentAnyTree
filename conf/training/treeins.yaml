@@ -30,7 +30,7 @@ checkpoint_dir: ""
 # Those arguments within experiment defines which model, dataset and task to be created for benchmarking
 # parameters for Weights and Biases
 wandb:
-  entity: "maciej-wielgosz-nibio" #TO ADAPT: change to your own wandb account name
+  entity: "your-wandb-entity" #TO ADAPT: change to your own wandb account name
   project: test 
   log: True
   notes: "treeins"

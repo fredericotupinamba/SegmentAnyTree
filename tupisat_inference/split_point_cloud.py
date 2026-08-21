@@ -2,9 +2,9 @@ import os
 import pandas as pd
 from tqdm import tqdm
 
-from nibio_inference.ply_to_pandas import ply_to_pandas
-from nibio_inference.las_to_pandas import las_to_pandas
-from nibio_inference.pandas_to_ply import pandas_to_ply
+from tupisat_inference.ply_to_pandas import ply_to_pandas
+from tupisat_inference.las_to_pandas import las_to_pandas
+from tupisat_inference.pandas_to_ply import pandas_to_ply
 
 def split_pointcloud(df, x_step, y_step, overlap=0.0, verbose=False):
     """

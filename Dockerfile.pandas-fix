@@ -7,20 +7,33 @@ FROM maciekwielgosz/segment-any-tree:latest
 # numpy 1.24.4 already present in the final stage.
 RUN python3.8 -m pip install --no-cache-dir --force-reinstall --no-deps pandas==1.5.3
 
-# Each input LAS file here is ~80-90M points; las_to_pandas.py upcasts every
-# dimension to float64 (because gps_time is float64), so a single file can
-# peak at 25-35GB while converting. The upstream n_jobs=4 tries to convert
-# all files concurrently, which OOM-kills workers well before the container's
-# memory limit is even close for anything but tiny inputs. Process files
-# sequentially instead.
-COPY nibio_inference/pipeline_utm2local_parallel.py /home/nibio/mutable-outside-world/nibio_inference/pipeline_utm2local_parallel.py
-
-# pandas_to_ply.py built its structured array via
-# np.array(list(map(tuple, df.to_records())), dtype=...), which boxes every
-# scalar as a Python object (~90M rows x ~14 cols) -- this was the actual
-# ~46GB RSS driver, not the LAS loading step. Casting the record array
-# directly is equivalent (verified) and fully vectorized.
-COPY nibio_inference/pandas_to_ply.py /home/nibio/mutable-outside-world/nibio_inference/pandas_to_ply.py
+# The upstream image's own package is still named nibio_inference/ (baked
+# into its layers -- not something we can rename without rebuilding it from
+# scratch, see Dockerfile/Dockerfile_cuda_11.8.0 for that). We ship our own
+# renamed, bug-fixed tupisat_inference/ package as a sibling package instead
+# of touching the upstream one: batch_orchestrator.py and every step script
+# it subprocess-calls (fix_naming_of_input_files.py, pipeline_utm2local_
+# parallel.py, modify_eval.py, clear_cache.py, rename_result_files_*.py,
+# merge_pt_ss_is_in_folders.py, forest_metrics/) live under this one tree
+# and only import from each other via `tupisat_inference.xxx`, so the whole
+# package has to travel together as one copy rather than file-by-file --
+# splitting it (as an earlier version of this file did) leaves scripts like
+# fix_naming_of_input_files.py missing from the image entirely, since they
+# only exist under the upstream's untouched nibio_inference/, not this one.
+#
+# Two specific fixes are baked into the files this copies in, verified
+# against a real ~90M-point input:
+# - pipeline_utm2local_parallel.py: the upstream n_jobs=4 tries to convert
+#   all files concurrently; las_to_pandas.py upcasts every dimension to
+#   float64 (gps_time is float64), so a single file can peak at 25-35GB --
+#   concurrent conversion OOM-kills workers well before the container limit
+#   for anything but tiny inputs. Process files sequentially instead.
+# - pandas_to_ply.py: built its structured array via
+#   np.array(list(map(tuple, df.to_records())), dtype=...), which boxes
+#   every scalar as a Python object (~90M rows x ~14 cols) -- this was the
+#   actual ~46GB RSS driver, not the LAS loading step. Casting the record
+#   array directly is equivalent and fully vectorized.
+COPY tupisat_inference/ /home/nibio/mutable-outside-world/tupisat_inference/
 
 # Same mixed-install problem as pandas above, this time in scikit-learn: pip
 # metadata reports 1.1.3 but sklearn/metrics/_pairwise_distances_reduction/
@@ -29,6 +42,14 @@ COPY nibio_inference/pandas_to_ply.py /home/nibio/mutable-outside-world/nibio_in
 # extension, which is still the 1.1.3 build and doesn't export it. Force a
 # clean, single-version reinstall.
 RUN python3.8 -m pip install --no-cache-dir --force-reinstall --no-deps scikit-learn==1.3.2
+
+# scikit-image (skimage.measure.CircleModel/ransac) and CSF (cloth
+# simulation filter, ground extraction) are used by tupisat_inference/
+# forest_metrics/ to compute per-tree DBH/taper and a DTM from the
+# segmented output -- not present in the upstream image.
+RUN python3.8 -m pip install --no-cache-dir \
+    scikit-image==0.16.2 \
+    cloth-simulation-filter
 
 # torch_points3d/utils/meanshift_cluster.py ran its per-tile MeanShift calls
 # through multiprocessing.Pool (fork). Forking a process that already has an
@@ -40,6 +61,17 @@ COPY torch_points3d/utils/meanshift_cluster.py /home/nibio/mutable-outside-world
 # Force unbuffered stdout/stderr so progress (including tqdm) is actually
 # visible in `docker logs` instead of sitting in a buffer.
 ENV PYTHONUNBUFFERED=1
+
+# The upstream image still has the old run_oracle_pipeline.sh batch loop
+# (non-resumable, no per-file state/progress). batch_state.py,
+# batch_orchestrator.py and forest_metrics/ (a new pipeline step -- runs
+# after "merge", before "finalize", see batch_orchestrator.py) all came in
+# with the bulk tupisat_inference/ copy above; only the two entry-point
+# shell scripts need copying separately here.
+COPY run_batch_pipeline.sh /home/nibio/mutable-outside-world/run_batch_pipeline.sh
+COPY run_batch_inference.sh /home/nibio/mutable-outside-world/run_batch_inference.sh
+RUN chmod +x /home/nibio/mutable-outside-world/run_batch_pipeline.sh \
+    /home/nibio/mutable-outside-world/run_batch_inference.sh
 
 # Wrap the real entrypoint with a background heartbeat that independently
 # logs GPU state every 30s, so liveness can be confirmed from `docker logs`

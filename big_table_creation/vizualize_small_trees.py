@@ -11,7 +11,7 @@ from joblib import Parallel, delayed
 
 import numpy as np
 
-from nibio_inference.las_to_pandas import las_to_pandas
+from tupisat_inference.las_to_pandas import las_to_pandas
 import json
 
 # HIGH_RANGES = [0, 0.5, 10.0, 15.0, 20.0, 25.0, 30.0, 40.0, 50.0]

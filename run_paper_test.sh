@@ -4,7 +4,7 @@ export PYTHONPATH='/home/nibio/mutable-outside-world'
 # Base directories
 # BASE_DIR=~/data/test_data_agnostic_instanceSeg
 
-BASE_DIR=/home/nibio/data/timing_check
+BASE_DIR=/home/tupisat/data/timing_check
 
 # BASE_DIR=/home/nibio/mutable-outside-world/maciek_1_2_3  # Debugging
 

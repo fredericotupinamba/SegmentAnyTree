@@ -1,5 +1,5 @@
 import pandas as pd
-from nibio_inference.las_to_pandas import las_to_pandas
+from tupisat_inference.las_to_pandas import las_to_pandas
 
 
 

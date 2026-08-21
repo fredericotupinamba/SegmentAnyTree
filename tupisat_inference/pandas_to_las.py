@@ -1,3 +1,5 @@
+import os
+
 import laspy
 import pandas as pd
 
@@ -123,7 +125,13 @@ def pandas_to_las(csv, csv_file_provided=False, output_file_path=None, do_compre
 
     # Write the file to disk
     if do_compress:
-        output_file_path = output_file_path.replace('.las', '.laz')
+        # Only swap the extension of the final path component -- a naive
+        # whole-path str.replace('.las', '.laz') also mangles any '.las'
+        # that happens to appear earlier in the path (e.g. a working
+        # directory named after the original input file), pointing the
+        # write at a directory that was never created.
+        base, _ext = os.path.splitext(output_file_path)
+        output_file_path = base + '.laz'
         las_file.write(output_file_path, do_compress=True)
     else:
         las_file.write(output_file_path, do_compress=False)
@@ -131,9 +139,9 @@ def pandas_to_las(csv, csv_file_provided=False, output_file_path=None, do_compre
     if verbose:
         if csv_file_provided:
             print('The input file was is {}'.format(csv))
-        
+
         if do_compress:
-            print('File saved as: {}'.format(output_file_path.replace('.las', '.laz')))
+            print('File saved as: {}'.format(output_file_path))
         else:
             print('File saved as: {}'.format(output_file_path))
 

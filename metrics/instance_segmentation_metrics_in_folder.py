@@ -9,8 +9,8 @@ import jaklas
 from metrics.instance_segmentation_metrics import InstanceSegmentationMetrics
 from metrics.attach_labels_to_las_file_pred2gt import AttachLabelsToLasFilePred2Gt
 
-from nibio_inference.ply_to_pandas import ply_to_pandas
-from nibio_inference.pandas_to_las import pandas_to_las
+from tupisat_inference.ply_to_pandas import ply_to_pandas
+from tupisat_inference.pandas_to_las import pandas_to_las
 
 class InstanceSegmentationMetricsInFolder():
     GT_LABEL_NAME = 'treeID' # 'StemID' or 'treeID' 

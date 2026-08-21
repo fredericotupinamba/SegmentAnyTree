@@ -7,17 +7,19 @@ import laspy
 import concurrent.futures
 import numpy as np
 
+from scipy.spatial import KDTree
+
 import pandas as pd
 
 import dask.dataframe as dd  # dask==2021.8.1
 
-from nibio_inference.ply_to_pandas import ply_to_pandas
-from nibio_inference.las_to_pandas import las_to_pandas
-from nibio_inference.pandas_to_ply import pandas_to_ply
-from nibio_inference.pandas_to_las import pandas_to_las
+from tupisat_inference.ply_to_pandas import ply_to_pandas
+from tupisat_inference.las_to_pandas import las_to_pandas
+from tupisat_inference.pandas_to_ply import pandas_to_ply
+from tupisat_inference.pandas_to_las import pandas_to_las
 
 
-class MergePtSsIs(object):
+class MergePtSsIsKnn(object):
     def __init__(self, 
                  point_cloud, 
                  semantic_segmentation, 
@@ -59,53 +61,65 @@ class MergePtSsIs(object):
             df = ply_to_pandas(file_path)
             df.rename(columns={'X': 'x', 'Y': 'y', 'Z': 'z'}, inplace=True)
             df.sort_values(by=['x', 'y', 'z'], inplace=True)
-            df['xyz_index'] = df['x'].astype(str) + "_" + df['y'].astype(str) + "_" + df['z'].astype(str)
-            df.set_index('xyz_index', inplace=True)
             return df
 
         point_cloud_df = preprocess_data(self.point_cloud)
         semantic_segmentation_df = preprocess_data(self.semantic_segmentation)
         instance_segmentation_df = preprocess_data(self.instance_segmentation)
 
-        # save to csv files for debugging
-        # point_cloud_df.to_csv(self.point_cloud.replace('.ply', '.csv'))
-        # semantic_segmentation_df.to_csv(self.semantic_segmentation.replace('.ply', '.csv'))
-        # instance_segmentation_df.to_csv(self.instance_segmentation.replace('.ply', '.csv'))
+        # Create a KDTree using the points from df_semantic_segmentation
+        tree_semantic = KDTree(semantic_segmentation_df[['x', 'y', 'z']])
+
+        # For each point in df_point_cloud, find the closest point in df_semantic_segmentation
+        _, indices_semantic = tree_semantic.query(point_cloud_df[['x', 'y', 'z']])
+
+        # Fetch the corresponding rows from df_semantic_segmentation
+        df_semantic_segmentation_matched = semantic_segmentation_df.iloc[indices_semantic]
+
+        # Reset index for the new dataframe
+        df_semantic_segmentation_matched.reset_index(drop=True, inplace=True)
+
+        # save the matched semantic segmentation to a file for debugging with an appropriate name
+        df_semantic_segmentation_matched.to_csv(self.output_file_path.replace('.laz', '_semantic_segmentation_matched.csv'), index=False)
+
+        # do for instance segmentation
+        # Create a KDTree using the points from df_instance_segmentation
+        tree_instance = KDTree(instance_segmentation_df[['x', 'y', 'z']])
+
+        # For each point in df_point_cloud, find the closest point in df_instance_segmentation
+        _, indices_instance = tree_instance.query(point_cloud_df[['x', 'y', 'z']])
+
+        # Fetch the corresponding rows from df_instance_segmentation
+        df_instance_segmentation_matched = instance_segmentation_df.iloc[indices_instance]
+
+        # Reset index for the new dataframe
+        df_instance_segmentation_matched.reset_index(drop=True, inplace=True)
+
+        # save the matched instance segmentation to a file for debugging with an appropriate name
+        df_instance_segmentation_matched.to_csv(self.output_file_path.replace('.laz', '_instance_segmentation_matched.csv'), index=False)
 
         # Rename columns for semantic and instance segmentations
-        semantic_segmentation_df.columns = [f'{col}_semantic_segmentation' for col in semantic_segmentation_df.columns]
-        instance_segmentation_df.columns = [f'{col}_instance_segmentation' for col in instance_segmentation_df.columns]
+        df_semantic_segmentation_matched.columns = [f'{col}_semantic_segmentation' for col in semantic_segmentation_df.columns]
+        df_instance_segmentation_matched.columns = [f'{col}_instance_segmentation' for col in instance_segmentation_df.columns]
 
-        # Convert to Dask DataFrames for parallel processing
-        point_cloud_dd = dd.from_pandas(point_cloud_df, npartitions=48)
-        semantic_segmentation_dd = dd.from_pandas(semantic_segmentation_df, npartitions=48)
-        instance_segmentation_dd = dd.from_pandas(instance_segmentation_df, npartitions=48)
+        # Merge point cloud
+        # create and empty data frame
+        merged_df = pd.DataFrame()
+        # add all the columns from point_cloud_df to the merged data frame
+        merged_df = pd.concat([merged_df, point_cloud_df], axis=1)
 
-        # Merge using Dask
-        merged_dd = point_cloud_dd.join(semantic_segmentation_dd, how='outer')
-        merged_dd = merged_dd.join(instance_segmentation_dd, how='outer')
+        # add all the columns from df_semantic_segmentation_matched to the merged data frame except the x, y and z columns
+        merged_df = pd.concat([merged_df, df_semantic_segmentation_matched.drop(columns=['x', 'y', 'z'])], axis=1)
 
-        # Convert back to pandas DataFrame
-        merged_df = merged_dd.compute()
+        # # add all the columns from df_instance_segmentation_matched to the merged data frame except the x, y and z columns
+        # merged_df = pd.concat([merged_df, df_instance_segmentation_matched.drop(columns=['x', 'y', 'z'])], axis=1)
+
 
         # remove the following columns from the merged data frame : x_instance_segmentation, y_instance_segmentation, z_instance_segmentation
         merged_df.drop(columns=['x_instance_segmentation', 'y_instance_segmentation', 'z_instance_segmentation'], inplace=True)
 
         # remove the following columns from the merged data frame : x_semantic_segmentation, y_semantic_segmentation, z_semantic_segmentation
         merged_df.drop(columns=['x_semantic_segmentation', 'y_semantic_segmentation', 'z_semantic_segmentation'], inplace=True)
-
-        # remove the following colum 'gt_semantic_segmentation' from the merged data frame
-        # merged_df.drop(columns=['gt_semantic_segmentation'], inplace=True)
-
-        # where in column 'preds_instance_segmentation' there is no value, replace it with the value from column 'preds_semantic_segmentation'
-        # merged_df['preds_instance_segmentation'] = merged_df['preds_instance_segmentation'].fillna(merged_df['preds_semantic_segmentation'])
-
-        # rename column 'preds_semantic_segmentation' to 'predSemantic'
-        merged_df.rename(columns={'preds_semantic_segmentation': 'PredSemantic'}, inplace=True)
-
-        # rename column 'preds_instance_segmentation' to 'predInstance'
-        merged_df.rename(columns={'preds_instance_segmentation': 'PredInstance'}, inplace=True)
-
 
         # Post-process merged data
         min_values_path = self.point_cloud.replace('.ply', '_min_values.json')
@@ -116,17 +130,6 @@ class MergePtSsIs(object):
         merged_df['x'] = merged_df['x'].astype(float) + min_x
         merged_df['y'] = merged_df['y'].astype(float) + min_y
         merged_df['z'] = merged_df['z'].astype(float) + min_z
-
-        # add 1 to PredInstance column
-        merged_df['PredInstance'] = merged_df['PredInstance'] + 1
-
-        # Assign NaNs in PredInstance to 0. This is because the instance segmentation
-        # may not have been able to assign an instance ID to every point, so after the
-        # outer join, it is possible to have missing values in PredInstance. This causes
-        # an issue when saving the data to a .las file, as we want to cast the column to
-        # an unsigned integer type, which does not support NaNs.
-        merged_df['PredInstance'] = merged_df['PredInstance'].fillna(0)
-
         return merged_df
     
     def save(self, merged_df):
@@ -166,20 +169,20 @@ class MergePtSsIs(object):
         #     output_file_path=self.output_file_path
         #     )
         
-        pandas_to_las(
-            merged_df,
-            csv_file_provided=False,
-            output_file_path=self.output_file_path,
-            do_compress=True,
-            verbose=self.verbose
-            )
+        # pandas_to_las(
+        #     merged_df,
+        #     csv_file_provided=False,
+        #     output_file_path=self.output_file_path
+        #     )
         
-        # save the merged data frame to a file using jaklas as a .las file
-        # jaklas.write(merged_df, self.output_file_path, point_format=3, scale=(0.001, 0.001, 0.001))
+    
 
-        # # convert to laz
-        # las = laspy.read(self.output_file_path)
-        # las.write(self.output_file_path.replace('.las', '.laz'), do_compress=True)
+        # save the merged data frame to a file using jaklas as a .las file
+        jaklas.write(merged_df, self.output_file_path, point_format=2, scale=(0.001, 0.001, 0.001))
+
+        # convert to laz
+        las = laspy.read(self.output_file_path)
+        las.write(self.output_file_path.replace('.las', '.laz'), do_compress=True)
 
 
     def run(self):
@@ -228,7 +231,7 @@ if __name__ == "__main__":
 
 
     # run the merge
-    merge_pt_ss_is = MergePtSsIs(
+    merge_pt_ss_is = MergePtSsIsKnn(
         point_cloud=POINT_CLOUD,
         semantic_segmentation=SEMANTIC_SEGMENTATION,
         instance_segmentation=INSTANCE_SEGMENTATION,

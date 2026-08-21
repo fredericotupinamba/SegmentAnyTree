@@ -12,7 +12,7 @@ base_dir="/home/nibio/mutable-outside-world/for_instance_no_outer_sparse_many_ti
 
 # Call the Python script for each results directory
 for i in {10,25,50,75,100}; do
-    python3 nibio_inference/merge_inference_results.py -i "${base_dir}/results_${i}" -o "${results_folder}/results_${i}.csv"
+    python3 tupisat_inference/merge_inference_results.py -i "${base_dir}/results_${i}" -o "${results_folder}/results_${i}.csv"
 done
 
 # Merge CSV files

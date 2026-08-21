@@ -5,10 +5,10 @@ import jaklas
 
 from tqdm import tqdm
 
-from nibio_inference.pandas_to_ply import pandas_to_ply
-from nibio_inference.pandas_to_las import pandas_to_las  # Assuming you have this function
-from nibio_inference.ply_to_pandas import ply_to_pandas
-from nibio_inference.las_to_pandas import las_to_pandas  # Assuming you have this function
+from tupisat_inference.pandas_to_ply import pandas_to_ply
+from tupisat_inference.pandas_to_las import pandas_to_las  # Assuming you have this function
+from tupisat_inference.ply_to_pandas import ply_to_pandas
+from tupisat_inference.las_to_pandas import las_to_pandas  # Assuming you have this function
 
 
 def revert_ply_modification(input_file_path, min_values_path, output_file_path):

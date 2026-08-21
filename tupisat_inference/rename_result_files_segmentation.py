@@ -1,9 +1,8 @@
-import json
 import sys
 import os
 import yaml
 
-from nibio_inference.bring_back_to_utm_coordinates import bring_back_to_utm_coordinates
+from tupisat_inference.bring_back_to_utm_coordinates import bring_back_to_utm_coordinates
 
 def rename_files(yaml_file, directory):
     try:
@@ -15,17 +14,15 @@ def rename_files(yaml_file, directory):
             fold_section = data.get('data', {}).get('fold', [])
 
             for index, file_path in enumerate(fold_section):
-
                 # Extract the file name from the path
                 file_name = os.path.basename(file_path)
                 
                 # Create new file name as result_index.ply
-                old_file_name = f'result_{index}.ply'
-
-                # use file_name to create new file name by add instance_segmenta
-                new_file_name = 'instance_segmentation_' + file_name 
-
+                old_file_name = f'semantic_result_{index}.ply'
                 old_file_path = os.path.join(directory, old_file_name)
+
+                # put semantic_segmentation_ in front of the file name
+                new_file_name = 'semantic_segmentation_'+ file_name
                 new_file_path = os.path.join(directory, new_file_name)
 
                 # Rename the file
@@ -43,7 +40,7 @@ if __name__ == '__main__':
         print('Usage: python script.py <yaml_file> <directory>')
         sys.exit(1)
     
-    yaml_file = sys.argv[1]  # Path to the YAML file that contains the paths of the .ply files
-    directory = sys.argv[2] # Path to the directory containing the .ply files after inference
+    yaml_file = sys.argv[1]
+    directory = sys.argv[2]
 
     rename_files(yaml_file, directory)

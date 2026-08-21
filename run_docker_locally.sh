@@ -1,7 +1,7 @@
 #!/bin/bash
 
 CONTAINER_NAME="test_e2e_instance"
-IMAGE_NAME="nibio/e2e-instance"
+IMAGE_NAME="tupisat/e2e-instance"
 
 # Check if the container exists
 if [ $(docker container ls -a -q -f name=$CONTAINER_NAME) ]; then

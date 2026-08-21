@@ -7,9 +7,9 @@ from tqdm import tqdm
 from collections import defaultdict
 from joblib import Parallel, delayed
 
-from nibio_inference.ply_to_pandas import ply_to_pandas
-from nibio_inference.las_to_pandas import las_to_pandas
-from nibio_inference.pandas_to_ply import pandas_to_ply
+from tupisat_inference.ply_to_pandas import ply_to_pandas
+from tupisat_inference.las_to_pandas import las_to_pandas
+from tupisat_inference.pandas_to_ply import pandas_to_ply
 
 
 def compute_centroid(points):

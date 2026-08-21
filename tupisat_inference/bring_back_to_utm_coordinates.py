@@ -1,6 +1,6 @@
 import json
-from nibio_inference.ply_to_pandas import ply_to_pandas
-from nibio_inference.pandas_to_ply import pandas_to_ply
+from tupisat_inference.ply_to_pandas import ply_to_pandas
+from tupisat_inference.pandas_to_ply import pandas_to_ply
 
 
 def bring_back_to_utm_coordinates(path_to_new_file, path_to_the_old_file):

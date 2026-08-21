@@ -1,6 +1,6 @@
 #!/bin/bash
 
-DATA_PATH=/home/nibio/data/test_data_agnostic_instanceSeg_treeins_agnostic_sparse_1000_500_100_10/results_/for_instance_no_outer_out/final_results
+DATA_PATH=/home/tupisat/data/test_data_agnostic_instanceSeg_treeins_agnostic_sparse_1000_500_100_10/results_/for_instance_no_outer_out/final_results
 TMP_DIR=/home/nibio/mutable-outside-world/tmp_per_class_metric
 
 # remove tmp dir if exists

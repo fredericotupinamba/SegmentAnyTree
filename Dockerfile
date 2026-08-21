@@ -255,9 +255,17 @@ RUN python3.8 -m pip install --no-cache-dir \
     dask==2021.8.1 \
     pykdtree==1.3.7.post0
 
+# scikit-image (skimage.measure.CircleModel/ransac) and CSF (cloth
+# simulation filter, ground extraction) are used by tupisat_inference/
+# forest_metrics/ to compute per-tree DBH/taper and a DTM from the
+# segmented output -- not pulled in by anything else installed above.
+RUN python3.8 -m pip install --no-cache-dir \
+    scikit-image==0.16.2 \
+    cloth-simulation-filter
+
 RUN mkdir -p /home/datascience
 
 COPY . /home/nibio/mutable-outside-world
 WORKDIR /home/nibio/mutable-outside-world
 
-ENTRYPOINT ["bash", "run_oracle_pipeline.sh"]
+ENTRYPOINT ["bash", "run_batch_pipeline.sh"]

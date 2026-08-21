@@ -6,8 +6,8 @@ import pandas as pd
 from scipy.interpolate import griddata
 from scipy.spatial import KDTree
 
-from nibio_inference.pandas_to_las import pandas_to_las
-from nibio_inference.ply_to_pandas import ply_to_pandas
+from tupisat_inference.pandas_to_las import pandas_to_las
+from tupisat_inference.ply_to_pandas import ply_to_pandas
 
 
 class DistanceFilteringDemBased(object):

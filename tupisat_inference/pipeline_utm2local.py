@@ -4,9 +4,9 @@ import os
 
 from tqdm import tqdm
 
-from nibio_inference.las_to_pandas import las_to_pandas
-from nibio_inference.pandas_to_ply import pandas_to_ply
-from nibio_inference.ply_to_pandas import ply_to_pandas
+from tupisat_inference.las_to_pandas import las_to_pandas
+from tupisat_inference.pandas_to_ply import pandas_to_ply
+from tupisat_inference.ply_to_pandas import ply_to_pandas
 
 
 def ply_modification_pipeline(input_file_path, output_file_path):

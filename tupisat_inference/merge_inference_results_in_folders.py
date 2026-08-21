@@ -5,7 +5,7 @@ import pandas as pd
 
 import shutil  # Legg til dette øverst i filen din
 
-from nibio_inference.merge_inference_results import main as merge_main
+from tupisat_inference.merge_inference_results import main as merge_main
 
 
 def process_folders(list_of_folders, output_file, verbose):
@@ -41,11 +41,11 @@ def process_folders(list_of_folders, output_file, verbose):
 
 if __name__ == '__main__':
     list_of_folders = [
-        "/home/nibio/data/test_data_agnostic_instanceSeg/results_/",
-        "/home/nibio/data/test_data_agnostic_instanceSeg/results_1000/",
-        "/home/nibio/data/test_data_agnostic_instanceSeg/results_500/",
-        "/home/nibio/data/test_data_agnostic_instanceSeg/results_100/",
-        "/home/nibio/data/test_data_agnostic_instanceSeg/results_10/"
+        "/home/tupisat/data/test_data_agnostic_instanceSeg/results_/",
+        "/home/tupisat/data/test_data_agnostic_instanceSeg/results_1000/",
+        "/home/tupisat/data/test_data_agnostic_instanceSeg/results_500/",
+        "/home/tupisat/data/test_data_agnostic_instanceSeg/results_100/",
+        "/home/tupisat/data/test_data_agnostic_instanceSeg/results_10/"
     ]
 
     output_file = 'merged_metrics_all.csv'
