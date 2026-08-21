@@ -115,15 +115,21 @@ def build_diameter_circle_points(tree_metrics_df: pd.DataFrame, taper_df_all: pd
         rows.append(df)
 
     if not taper_df_all.empty:
-        valid = taper_df_all.dropna(subset=["diameter_cm", "center_x", "center_y"])
+        # Use the monotonicity-corrected diameter for the visualized ring --
+        # the raw RANSAC diameter_cm can still show a branch-inflated bulge
+        # mid-trunk that apply_monotonic_correction (tree_metrics.py) has
+        # already reconciled away.
+        diameter_column = "diameter_corrected_cm" if "diameter_corrected_cm" in taper_df_all.columns else "diameter_cm"
+        valid = taper_df_all.dropna(subset=[diameter_column, "center_x", "center_y"])
         for r in valid.itertuples():
+            diameter_cm = getattr(r, diameter_column)
             z = float(dtm.ground_z(np.array([[r.center_x, r.center_y]]))[0]) + r.height_m
-            pts = circle_points(r.center_x, r.center_y, z, r.diameter_cm / 200, cfg.diameter_circle_n_points)
+            pts = circle_points(r.center_x, r.center_y, z, diameter_cm / 200, cfg.diameter_circle_n_points)
             if pts.shape[0] == 0:
                 continue
             df = pd.DataFrame(pts, columns=["x", "y", "z"])
             df["tree_id"] = np.int32(r.tree_id)
-            df["diameter_cm"] = np.float32(r.diameter_cm)
+            df["diameter_cm"] = np.float32(diameter_cm)
             df["kind_code"] = np.uint8(1)  # 1 = taper sample
             rows.append(df)
 

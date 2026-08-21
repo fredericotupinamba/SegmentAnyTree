@@ -48,6 +48,23 @@ class ForestMetricsConfig:
     max_plausible_diameter_cm: float = 250.0
     tree_height_percentile: float = 99.5
 
+    # Tree-vs-not-a-tree classification. A segmented instance is only kept
+    # as a tree if it has a full, well-covered stem cross-section at both
+    # breast height AND up at tree_validation_height_m -- this rejects
+    # shrubs/undergrowth (too short to have a slice up there at all) and
+    # plot-edge crown fragments (present but only ever partially scanned,
+    # so CCI stays low at every height) without needing a separate
+    # classifier. tree_validation_cci_threshold is deliberately much
+    # stricter than min_cci_for_valid_dbh (0.3) -- that one only asks "is
+    # this fit numerically sane", this one asks "is this really a whole
+    # tree stem". A real but heavily-occluded tree can still fail this and
+    # get dropped; if that turns out to reject too many legitimate trees
+    # in practice, loosen this value first before touching the DTM/RANSAC
+    # tuning above.
+    tree_validation_height_m: float = 4.0
+    tree_validation_cci_threshold: float = 0.8
+    min_valid_dbh_cm: float = 7.0
+
     # Crown metrics.
     crown_height_bin_m: float = 0.5
     crown_density_fraction: float = 0.3

@@ -13,11 +13,17 @@ def smalian_frustum_volume_m3(d_bottom_cm: float, d_top_cm: float, length_m: flo
     return (a_bottom + a_top) / 2 * length_m
 
 
-def _fill_and_extrapolate_taper(taper_df: pd.DataFrame, tree_height: float) -> pd.DataFrame:
+def _fill_and_extrapolate_taper(taper_df: pd.DataFrame, tree_height: float, diameter_column: str = "diameter_cm") -> pd.DataFrame:
     """Linearly interpolate NaN diameters between valid heights; extrapolate
     the tip to diameter=0 at tree_height if missing; back-fill the base from
-    the lowest valid diameter if missing."""
-    df = taper_df[["height_m", "diameter_cm"]].copy()
+    the lowest valid diameter if missing.
+
+    diameter_column defaults to the raw RANSAC diameter_cm (used directly by
+    the tests below with hand-built curves); forest_metrics.py passes
+    "diameter_corrected_cm" so volume is integrated over the
+    monotonicity-corrected curve instead of a curve a stray branch slice
+    could otherwise inflate mid-trunk."""
+    df = taper_df[["height_m", diameter_column]].rename(columns={diameter_column: "diameter_cm"}).copy()
     if df["diameter_cm"].notna().sum() == 0:
         return df
 
@@ -34,11 +40,13 @@ def _fill_and_extrapolate_taper(taper_df: pd.DataFrame, tree_height: float) -> p
     return df
 
 
-def integrate_taper_to_volume_m3(taper_df_single_tree: pd.DataFrame, tree_height: float, cfg: ForestMetricsConfig) -> float:
+def integrate_taper_to_volume_m3(
+    taper_df_single_tree: pd.DataFrame, tree_height: float, cfg: ForestMetricsConfig, diameter_column: str = "diameter_cm"
+) -> float:
     if taper_df_single_tree.empty or not np.isfinite(tree_height):
         return np.nan
 
-    filled = _fill_and_extrapolate_taper(taper_df_single_tree, tree_height)
+    filled = _fill_and_extrapolate_taper(taper_df_single_tree, tree_height, diameter_column)
     if filled["diameter_cm"].isna().all():
         return np.nan
 
@@ -61,7 +69,9 @@ def conic_volume_estimate_m3(dbh_cm: float, height_m: float) -> float:
     return (np.pi / 3) * r_m ** 2 * height_m
 
 
-def volume_by_log_assortment(taper_df_single_tree: pd.DataFrame, tree_height: float, cfg: ForestMetricsConfig) -> dict:
+def volume_by_log_assortment(
+    taper_df_single_tree: pd.DataFrame, tree_height: float, cfg: ForestMetricsConfig, diameter_column: str = "diameter_cm"
+) -> dict:
     result = {}
     for a in cfg.log_assortments:
         result[f"volume_{a.name}_m3"] = 0.0
@@ -71,7 +81,7 @@ def volume_by_log_assortment(taper_df_single_tree: pd.DataFrame, tree_height: fl
     if taper_df_single_tree.empty or not np.isfinite(tree_height):
         return result
 
-    filled = _fill_and_extrapolate_taper(taper_df_single_tree, tree_height)
+    filled = _fill_and_extrapolate_taper(taper_df_single_tree, tree_height, diameter_column)
     if filled["diameter_cm"].isna().all():
         return result
 

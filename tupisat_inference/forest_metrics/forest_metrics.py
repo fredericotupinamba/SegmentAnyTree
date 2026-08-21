@@ -26,7 +26,7 @@ from tupisat_inference.forest_metrics.visualization import (
     build_label_points,
 )
 
-TAPER_COLUMNS = ["tree_id", "height_m", "diameter_cm", "cci", "n_points", "center_x", "center_y"]
+TAPER_COLUMNS = ["tree_id", "height_m", "diameter_cm", "diameter_corrected_cm", "cci", "n_points", "center_x", "center_y"]
 
 REQUIRED_COLUMNS = ("X", "Y", "Z", "PredSemantic", "PredInstance")
 
@@ -73,13 +73,15 @@ class ForestMetrics(object):
 
         rows = []
         taper_frames = []
-        n_trees = tree_pts_df["PredInstance"].nunique() if not tree_pts_df.empty else 0
-        self._log(f"Measuring {n_trees} tree(s)")
+        n_instances = tree_pts_df["PredInstance"].nunique() if not tree_pts_df.empty else 0
+        self._log(f"Measuring {n_instances} segmented instance(s)")
 
         for tree_id, group in tree_pts_df.groupby("PredInstance"):
             row, taper_df = measure_tree(int(tree_id), group, dtm, self.cfg)
-            row.update(volume_by_log_assortment(taper_df, row["height_m"], self.cfg))
-            row["stem_volume_taper_m3"] = integrate_taper_to_volume_m3(taper_df, row["height_m"], self.cfg)
+            row.update(volume_by_log_assortment(taper_df, row["height_m"], self.cfg, diameter_column="diameter_corrected_cm"))
+            row["stem_volume_taper_m3"] = integrate_taper_to_volume_m3(
+                taper_df, row["height_m"], self.cfg, diameter_column="diameter_corrected_cm"
+            )
             row["stem_volume_conic_m3"] = conic_volume_estimate_m3(row["dbh_cm"], row["height_m"])
             rows.append(row)
             taper_frames.append(taper_df)
@@ -88,6 +90,21 @@ class ForestMetrics(object):
         taper_df_all = (
             pd.concat(taper_frames, ignore_index=True) if taper_frames else pd.DataFrame(columns=TAPER_COLUMNS)
         )
+
+        # Segmented instances that failed the tree-vs-shrub/plot-edge-fragment
+        # check (measure_tree's is_valid_tree) don't represent a countable
+        # tree in the plot -- drop them entirely rather than including them,
+        # flagged, in the outputs.
+        n_trees = 0
+        if not tree_metrics_df.empty:
+            valid_mask = tree_metrics_df["is_valid_tree"]
+            n_rejected = int((~valid_mask).sum())
+            if n_rejected:
+                self._log(f"Rejected {n_rejected} segmented instance(s) as not a tree (shrub/plot-edge fragment)")
+            valid_ids = tree_metrics_df.loc[valid_mask, "tree_id"]
+            tree_metrics_df = tree_metrics_df[valid_mask].drop(columns=["is_valid_tree"]).reset_index(drop=True)
+            taper_df_all = taper_df_all[taper_df_all["tree_id"].isin(valid_ids)].reset_index(drop=True)
+            n_trees = len(tree_metrics_df)
 
         plot_summary = summarize_plot(tree_metrics_df, dtm, tree_pts_df, self.cfg)
         if dtm_warnings:
