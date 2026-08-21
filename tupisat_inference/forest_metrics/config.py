@@ -49,20 +49,26 @@ class ForestMetricsConfig:
     tree_height_percentile: float = 99.5
 
     # Tree-vs-not-a-tree classification. A segmented instance is only kept
-    # as a tree if it has a full, well-covered stem cross-section at both
-    # breast height AND up at tree_validation_height_m -- this rejects
-    # shrubs/undergrowth (too short to have a slice up there at all) and
-    # plot-edge crown fragments (present but only ever partially scanned,
-    # so CCI stays low at every height) without needing a separate
-    # classifier. tree_validation_cci_threshold is deliberately much
-    # stricter than min_cci_for_valid_dbh (0.3) -- that one only asks "is
-    # this fit numerically sane", this one asks "is this really a whole
-    # tree stem". A real but heavily-occluded tree can still fail this and
-    # get dropped; if that turns out to reject too many legitimate trees
-    # in practice, loosen this value first before touching the DTM/RANSAC
-    # tuning above.
+    # as a tree if it reaches tree_validation_height_m at all (rejects
+    # shrubs/undergrowth) AND shows a consistent, well-covered circular
+    # cross-section at several heights between the ground and
+    # tree_validation_height_m, not just one (rejects plot-edge crown
+    # fragments and branch clusters that can look tree-like in a single
+    # lucky slice but don't repeat). Verified against real TLS data that a
+    # single slice's CCI is *not* reliable evidence on its own: three real,
+    # well-formed trees (DBH CCI 0.85-1.0) got misclassified as not-a-tree
+    # purely because their one dedicated slice at exactly
+    # tree_validation_height_m had CCI 0.33-0.74 -- angular coverage
+    # naturally degrades higher up a TLS/MLS scan, so one slice can dip
+    # below threshold on a real tree for reasons that have nothing to do
+    # with whether it's a shrub. tree_validation_cci_threshold (0.8) is
+    # deliberately much stricter than min_cci_for_valid_dbh (0.3) -- that
+    # one only asks "is this fit numerically sane", this one asks "is this
+    # slice a real, fully-covered stem cross-section". DBH counts as one of
+    # the qualifying slices if it clears the threshold.
     tree_validation_height_m: float = 4.0
     tree_validation_cci_threshold: float = 0.8
+    min_high_cci_slices: int = 3
     min_valid_dbh_cm: float = 7.0
 
     # Crown metrics.

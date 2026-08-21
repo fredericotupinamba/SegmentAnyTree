@@ -114,10 +114,12 @@ def test_measure_tree_rejects_stem_thinner_than_min_valid_dbh():
 
 def test_measure_tree_rejects_partial_arc_plot_edge_fragment():
     cfg = ForestMetricsConfig()
-    # ~200 degrees of angular coverage -> CCI comfortably above the 0.3
-    # fit-sanity floor (so dbh_cm is a real number, not NaN) but below the
-    # stricter 0.8 tree-validation bar -- a plausible plot-edge/occlusion
-    # fragment rather than an outright failed fit.
+    # ~200 degrees of angular coverage, uniformly at every height -> CCI
+    # comfortably above the 0.3 fit-sanity floor (so dbh_cm is a real
+    # number, not NaN) but below the stricter 0.8 tree-validation bar at
+    # every single slice -- a plausible plot-edge/occlusion fragment, never
+    # accumulating the min_high_cci_slices consistent good readings a real
+    # trunk would.
     tree_df = _cylinder_tree_df(radius_cm=15.0, z_top=12.0, arc_deg=200.0)
 
     row, _ = measure_tree(4, tree_df, _flat_dtm(), cfg)
@@ -125,6 +127,34 @@ def test_measure_tree_rejects_partial_arc_plot_edge_fragment():
     assert row["is_valid_tree"] is False
     assert np.isfinite(row["dbh_cm"])
     assert row["dbh_cci"] < cfg.tree_validation_cci_threshold
+
+
+def test_measure_tree_accepts_tree_with_poor_coverage_at_a_single_height():
+    """Real-data regression: three trees with excellent DBH CCI (0.85-1.0)
+    were wrongly rejected by an earlier version of this check because their
+    one dedicated slice at exactly tree_validation_height_m happened to have
+    poor angular coverage (CCI 0.33-0.74) -- normal TLS/MLS coverage loss
+    with height, not evidence of a shrub or fragment. Requiring several
+    consistent good slices (rather than trusting a single height) should
+    tolerate one bad slice on an otherwise well-formed tree."""
+    cfg = ForestMetricsConfig()
+    rng = np.random.default_rng(1)
+    radius_m = 0.15
+    z_top = 12.0
+    zs = np.linspace(0.0, z_top, 200)
+    rows = []
+    for z in zs:
+        arc_deg = 90.0 if abs(z - cfg.tree_validation_height_m) < 0.3 else 360.0
+        theta = rng.uniform(0, np.radians(arc_deg), 150)
+        x = radius_m * np.cos(theta)
+        y = radius_m * np.sin(theta)
+        rows.append(np.column_stack([x, y, np.full(150, z)]))
+    tree_df = pd.DataFrame(np.vstack(rows), columns=["X", "Y", "Z"])
+
+    row, _ = measure_tree(6, tree_df, _flat_dtm(), cfg)
+
+    assert row["is_valid_tree"] is True
+    assert "rejected_not_a_tree" not in row["quality_flags"]
 
 
 def _taper_df_with_branch_bump(seed=0):

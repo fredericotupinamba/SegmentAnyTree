@@ -150,22 +150,6 @@ def compute_dbh(tree_xyz: np.ndarray, hag: np.ndarray, cfg: ForestMetricsConfig)
     }
 
 
-def compute_validation_diameter(tree_xyz: np.ndarray, hag: np.ndarray, cfg: ForestMetricsConfig) -> dict:
-    """Diameter at tree_validation_height_m (default 4m), measured the same
-    way as DBH. Used only to decide whether a segmented instance is a real
-    tree (see measure_tree) -- a shrub/sapling has no stem left up there at
-    all (n_points near zero -> NaN diameter), and a plot-edge crown
-    fragment that only ever got a partial scan stays below the CCI bar at
-    every height, not just at breast height."""
-    fit = _diameter_at_height(
-        tree_xyz, hag, cfg.tree_validation_height_m, cfg.dbh_slice_thickness_m, cfg, cfg.dbh_ransac_max_trials
-    )
-    return {
-        "validation_diameter_cm": fit["diameter_cm"],
-        "validation_cci": fit["cci"],
-    }
-
-
 def compute_height(hag: np.ndarray, cfg: ForestMetricsConfig) -> float:
     if hag.shape[0] == 0:
         return np.nan
@@ -328,11 +312,10 @@ def measure_tree(tree_id: int, tree_df: pd.DataFrame, dtm: DTM, cfg: ForestMetri
     """Top-level per-tree measurement pipeline. Never raises for data-quality
     problems -- always returns a row (possibly mostly NaN) plus a taper
     DataFrame. row["is_valid_tree"] is False for segmented instances that
-    don't pass the tree-vs-shrub/plot-edge-fragment check (short undergrowth
-    with no stem left at tree_validation_height_m, or a partially-scanned
-    crown fragment that never reaches tree_validation_cci_threshold at any
-    height) -- forest_metrics.py drops those entirely rather than including
-    them in any output."""
+    don't pass the tree-vs-shrub/plot-edge-fragment check (too short to
+    reach tree_validation_height_m, or lacking a consistent, well-covered
+    circular cross-section at several heights below it) -- forest_metrics.py
+    drops those entirely rather than including them in any output."""
     flags = []
 
     tree_xyz = tree_df[["X", "Y", "Z"]].values
@@ -374,19 +357,35 @@ def measure_tree(tree_id: int, tree_df: pd.DataFrame, dtm: DTM, cfg: ForestMetri
     else:
         commercial_height_m = height_m
 
-    taper_df = compute_taper(tree_xyz, hag, commercial_height_m, cfg)
+    # Sample taper up to whichever is taller -- the commercial trunk height
+    # (needed for reporting) or tree_validation_height_m (needed for the
+    # tree-vs-not-a-tree check below) -- then split the two uses apart.
+    sampling_height_m = min(max(commercial_height_m, cfg.tree_validation_height_m), height_m)
+    full_taper_df = compute_taper(tree_xyz, hag, sampling_height_m, cfg)
+
+    taper_df = full_taper_df[full_taper_df["height_m"] <= commercial_height_m].reset_index(drop=True)
     if taper_df.empty or taper_df["diameter_cm"].isna().all():
         flags.append("no_taper_data")
     taper_df = apply_monotonic_correction(taper_df, dbh["dbh_cm"], cfg.dbh_height_m, dbh["dbh_n_points"], cfg)
     taper_df.insert(0, "tree_id", tree_id)
 
-    validation = compute_validation_diameter(tree_xyz, hag, cfg)
+    # Tree-vs-not-a-tree: must actually reach tree_validation_height_m (the
+    # shrub/undergrowth filter) AND show a consistent, well-covered
+    # circular cross-section at several heights between the ground and
+    # there, not just one -- a single high-CCI slice can happen on a branch
+    # cluster, and a single low-CCI slice can happen on a real trunk (see
+    # config.py for the real-data case that motivated counting several
+    # slices instead of trusting one). DBH counts as one of the slices.
+    validation_slices = full_taper_df[full_taper_df["height_m"] <= cfg.tree_validation_height_m]
+    high_cci_count = int((validation_slices["cci"] >= cfg.tree_validation_cci_threshold).sum())
+    if np.isfinite(dbh["dbh_cci"]) and dbh["dbh_cci"] >= cfg.tree_validation_cci_threshold:
+        high_cci_count += 1
+
     is_valid_tree = bool(
         np.isfinite(dbh["dbh_cm"])
         and dbh["dbh_cm"] >= cfg.min_valid_dbh_cm
-        and dbh["dbh_cci"] >= cfg.tree_validation_cci_threshold
-        and np.isfinite(validation["validation_diameter_cm"])
-        and validation["validation_cci"] >= cfg.tree_validation_cci_threshold
+        and height_m >= cfg.tree_validation_height_m
+        and high_cci_count >= cfg.min_high_cci_slices
     )
     if not is_valid_tree:
         flags.append("rejected_not_a_tree")
