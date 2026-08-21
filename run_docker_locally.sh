@@ -1,7 +1,7 @@
 #!/bin/bash
 
 CONTAINER_NAME="test_e2e_instance"
-IMAGE_NAME="tupisat/e2e-instance"
+IMAGE_NAME="fredericotupinamba/tupisat:latest"
 
 # Check if the container exists
 if [ $(docker container ls -a -q -f name=$CONTAINER_NAME) ]; then
@@ -27,9 +27,9 @@ echo "Running the container"
 
 docker run -it --gpus all \
     --name $CONTAINER_NAME \
-    --mount type=bind,source=/home/nibio/mutable-outside-world/code/PanopticSegForLargeScalePointCloud_maciej/bucket_in_folder,target=/home/nibio/mutable-outside-world/bucket_in_folder \
-    --mount type=bind,source=/home/nibio/mutable-outside-world/code/PanopticSegForLargeScalePointCloud_maciej/bucket_out_folder,target=/home/nibio/mutable-outside-world/bucket_out_folder \
-    $IMAGE_NAME 
+    --mount type=bind,source=/path/to/your/bucket_in_folder,target=/home/nibio/mutable-outside-world/bucket_in_folder \
+    --mount type=bind,source=/path/to/your/bucket_out_folder,target=/home/nibio/mutable-outside-world/bucket_out_folder \
+    $IMAGE_NAME
 
 
 

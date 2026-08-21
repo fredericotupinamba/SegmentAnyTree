@@ -181,3 +181,4 @@ check_list.info
 *.pdf
 *.png
 *.csv
+!tupisat-social-preview.png

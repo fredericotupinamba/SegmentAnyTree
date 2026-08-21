@@ -1,3 +1,6 @@
 #/bin/sh
-docker build -t tupisat/e2e-oracle-inst-seg:latest . # build for Oracle registry and change the flag to not debug mode before building
-# docker build -t tupisat/e2e-instance:latest .
+# Builds the patched image (see Dockerfile.pandas-fix) and tags it for
+# push to Docker Hub under fredericotupinamba/tupisat. Push with:
+#   docker login -u fredericotupinamba
+#   docker push fredericotupinamba/tupisat:latest
+docker build -f Dockerfile.pandas-fix -t fredericotupinamba/tupisat:latest .

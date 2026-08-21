@@ -1,5 +1,5 @@
  
-![SegmentAnyTree_logo](https://github.com/user-attachments/assets/8849a4b2-3bb3-4c6d-b1f1-13f91efc0936)
+![TUPISAT](tupisat-social-preview.png)
 
 # TUPISAT
 
