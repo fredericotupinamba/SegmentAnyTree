@@ -71,6 +71,21 @@ class ForestMetricsConfig:
     min_high_cci_slices: int = 3
     min_valid_dbh_cm: float = 7.0
 
+    # A high-CCI slice is well-covered, but that doesn't guarantee it's
+    # measuring *this* tree's own trunk -- two crowns overlapping, or a
+    # neighbour's stem/branch material getting attributed to this
+    # instance, can still produce a well-supported, high-CCI circle fit
+    # that just isn't this tree. Above breast height a real stem cannot
+    # get thicker (short of measurement noise), so tree_metrics.
+    # apply_monotonic_correction also excludes any slice above
+    # dbh_height_m whose diameter exceeds DBH by more than this ratio from
+    # its isotonic-regression input, on top of the CCI filter. Verified
+    # against real data: several such slices (CCI 0.8-0.91, diameter
+    # 163-221cm against a 31.8cm DBH) each individually passed the CCI bar
+    # but, left in, forced the corrected diameter for the entire tree --
+    # including untouched low, clean slices -- up to a single ~60cm value.
+    max_taper_over_dbh_ratio: float = 1.1
+
     # Crown metrics.
     crown_height_bin_m: float = 0.5
     crown_density_fraction: float = 0.3
@@ -78,9 +93,11 @@ class ForestMetricsConfig:
     crown_voxel_size_m: float = 0.25
 
     # Taper / volume. No fixed max height: sampling always stops at each
-    # tree's own measured height.
+    # tree's own measured height. 0.1 + n*0.2 lands exactly on 1.3m (DBH
+    # height), so the taper grid always includes a sample at breast height
+    # alongside the dedicated compute_dbh measurement there.
     taper_height_min_m: float = 0.1
-    taper_height_increment_m: float = 0.5
+    taper_height_increment_m: float = 0.2
     taper_slice_thickness_m: float = 0.2
     min_points_for_taper_slice: int = 8
     log_assortments: List[LogAssortment] = field(default_factory=_default_log_assortments)

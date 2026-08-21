@@ -261,20 +261,41 @@ def compute_taper(tree_xyz: np.ndarray, hag: np.ndarray, max_height_m: float, cf
 
 
 def apply_monotonic_correction(
-    taper_df: pd.DataFrame, dbh_cm: float, dbh_height_m: float, dbh_n_points: int, cfg: ForestMetricsConfig
+    taper_df: pd.DataFrame, dbh_cm: float, dbh_height_m: float, dbh_n_points: int, dbh_cci: float,
+    cfg: ForestMetricsConfig,
 ) -> pd.DataFrame:
     """Adds a diameter_corrected_cm column. A tree's diameter should never
     increase with height (ignoring base flare, which this ignores as a
-    minor simplification, same as most taper models) -- but a branch or
-    branch stub caught in a horizontal slice can inflate one sample above
-    the ones below it. Rather than discarding that sample or clamping it to
-    its neighbour, this fits the best non-increasing curve through every
-    sample at once (isotonic regression, weighted by n_points), so a
-    low-confidence outlier gets pulled toward its neighbours in proportion
-    to how many points actually support each measurement, instead of an
-    arbitrary cut. DBH is folded in as an extra anchor point since it
-    passed the stricter tree-validation CCI gate and is normally the most
-    trusted single measurement on the curve.
+    minor simplification, same as most taper models) -- but a branch, a
+    neighbouring tree's crown, or any other slice with poor angular
+    coverage can produce a diameter that's not just noisy but wildly wrong.
+
+    Only slices with cci >= tree_validation_cci_threshold (the same "is
+    this really a full, well-covered cross-section" bar used for the
+    tree-validity check) are used as *input* to the fit -- a low-CCI slice
+    is not weak evidence to be down-weighted, it is not evidence at all,
+    and including it (even weighted by n_points) can drag the *entire*
+    non-increasing curve toward a bad number, since a garbage slice isn't
+    guaranteed to carry fewer points than a clean one. Verified against
+    real data: a tree with 9 consecutive non-NaN-but-low-CCI slices (0.3-
+    0.68), several with more points than the clean slices below them,
+    pulled the corrected diameter for the entire tree -- including
+    untouched cci=1.0 samples -- to a single flat, physically implausible
+    value.
+
+    A high CCI alone still isn't sufficient, though: it means the circle
+    fit is well-supported by points on its circumference, not that those
+    points are actually this tree's own trunk rather than an overlapping
+    neighbour's crown or stem. Slices above breast height are additionally
+    dropped from the fit if their diameter exceeds DBH by more than
+    max_taper_over_dbh_ratio -- verified against real data where several
+    such slices individually passed the CCI bar but, left in, forced the
+    whole non-increasing curve up to match them (see config.py for the
+    exact numbers).
+
+    Every originally-measured height still gets a corrected value (via the
+    fitted curve's prediction/extrapolation), including the untrusted
+    ones -- they just don't get a vote in shaping that curve.
     """
     taper_df = taper_df.copy()
     taper_df["diameter_corrected_cm"] = np.nan
@@ -283,17 +304,30 @@ def apply_monotonic_correction(
     if valid.empty:
         return taper_df
 
-    heights = list(valid["height_m"].values)
-    diameters = list(valid["diameter_cm"].values)
-    weights = list(valid["n_points"].values.astype(float))
-
+    trusted = valid[valid["cci"] >= cfg.tree_validation_cci_threshold]
     if np.isfinite(dbh_cm):
+        implausible = (trusted["height_m"] > dbh_height_m) & (
+            trusted["diameter_cm"] > dbh_cm * cfg.max_taper_over_dbh_ratio
+        )
+        trusted = trusted[~implausible]
+
+    heights = list(trusted["height_m"].values)
+    diameters = list(trusted["diameter_cm"].values)
+    weights = list(trusted["n_points"].values.astype(float))
+
+    if np.isfinite(dbh_cm) and (not np.isfinite(dbh_cci) or dbh_cci >= cfg.tree_validation_cci_threshold):
         heights.append(dbh_height_m)
         diameters.append(dbh_cm)
         weights.append(float(max(dbh_n_points, 1)))
 
-    if len(heights) < 2:
-        taper_df.loc[valid.index, "diameter_corrected_cm"] = valid["diameter_cm"]
+    if not heights:
+        # No trustworthy slice anywhere on this tree to correct against --
+        # leaving diameter_corrected_cm as NaN here (rather than copying
+        # the raw, untrusted values through) matters: those raw values are
+        # exactly the ones this function exists to not trust, and passing
+        # them through unmodified can reintroduce the non-increasing
+        # violations the rest of the pipeline (volume, visualization)
+        # assumes are already resolved.
         return taper_df
 
     heights = np.asarray(heights)
@@ -360,13 +394,20 @@ def measure_tree(tree_id: int, tree_df: pd.DataFrame, dtm: DTM, cfg: ForestMetri
     # Sample taper up to whichever is taller -- the commercial trunk height
     # (needed for reporting) or tree_validation_height_m (needed for the
     # tree-vs-not-a-tree check below) -- then split the two uses apart.
+    # Correction runs on the *full* sampled range before truncating for
+    # reporting: a trusted slice between commercial_height_m and
+    # tree_validation_height_m (part of why the tree passed validation at
+    # all) is real evidence the corrected curve should use, even though
+    # that row itself won't appear in the reported taper.
     sampling_height_m = min(max(commercial_height_m, cfg.tree_validation_height_m), height_m)
     full_taper_df = compute_taper(tree_xyz, hag, sampling_height_m, cfg)
+    full_taper_df = apply_monotonic_correction(
+        full_taper_df, dbh["dbh_cm"], cfg.dbh_height_m, dbh["dbh_n_points"], dbh["dbh_cci"], cfg
+    )
 
     taper_df = full_taper_df[full_taper_df["height_m"] <= commercial_height_m].reset_index(drop=True)
     if taper_df.empty or taper_df["diameter_cm"].isna().all():
         flags.append("no_taper_data")
-    taper_df = apply_monotonic_correction(taper_df, dbh["dbh_cm"], cfg.dbh_height_m, dbh["dbh_n_points"], cfg)
     taper_df.insert(0, "tree_id", tree_id)
 
     # Tree-vs-not-a-tree: must actually reach tree_validation_height_m (the

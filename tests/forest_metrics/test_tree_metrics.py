@@ -165,6 +165,7 @@ def _taper_df_with_branch_bump(seed=0):
     return pd.DataFrame({
         "height_m": heights,
         "diameter_cm": diameters,
+        "cci": 1.0,  # trusted -- the bump itself is well-covered, just physically wrong
         "n_points": 200,
     }), bump_idx
 
@@ -173,7 +174,9 @@ def test_apply_monotonic_correction_pulls_down_branch_bump():
     cfg = ForestMetricsConfig()
     taper_df, bump_idx = _taper_df_with_branch_bump()
 
-    corrected = apply_monotonic_correction(taper_df, dbh_cm=38.0, dbh_height_m=1.3, dbh_n_points=2000, cfg=cfg)
+    corrected = apply_monotonic_correction(
+        taper_df, dbh_cm=38.0, dbh_height_m=1.3, dbh_n_points=2000, dbh_cci=1.0, cfg=cfg
+    )
 
     values = corrected["diameter_corrected_cm"].values
     assert np.all(np.isfinite(values))
@@ -183,13 +186,80 @@ def test_apply_monotonic_correction_pulls_down_branch_bump():
     assert values[bump_idx] < taper_df["diameter_cm"].values[bump_idx]
 
 
+def test_apply_monotonic_correction_ignores_low_cci_outliers_entirely():
+    """Real-data regression: a run of low-CCI (but non-NaN) garbage slices
+    -- some with *more* points than the clean slices below them -- must not
+    be allowed to drag the corrected curve for the clean slices at all.
+    On real data this collapsed an entire tree's corrected diameters,
+    including untouched cci=1.0 samples, to a single flat ~83cm value."""
+    cfg = ForestMetricsConfig()
+    heights = np.arange(0.1, 8.0, 0.5)
+    clean_diameters = 31.0 * (1 - heights / 20.0)  # smooth, well-covered taper
+    n_points = np.full(heights.shape, 2000.0)
+    cci = np.full(heights.shape, 1.0)
+
+    # From partway up, replace with real-data-like garbage: low CCI, huge
+    # and non-monotonic diameters, sometimes with *more* points than the
+    # clean slices below them.
+    garbage_from = len(heights) // 2
+    diameters = clean_diameters.copy()
+    diameters[garbage_from:] = [125.2, 78.5, 158.6, 35.8, 125.2, 144.2, 120.2, 139.7, 236.8, 90.0, 60.0][
+        : len(heights) - garbage_from
+    ]
+    cci[garbage_from:] = 0.6
+    n_points[garbage_from:] = 4000.0
+
+    taper_df = pd.DataFrame({"height_m": heights, "diameter_cm": diameters, "cci": cci, "n_points": n_points})
+
+    corrected = apply_monotonic_correction(
+        taper_df, dbh_cm=31.0, dbh_height_m=1.3, dbh_n_points=2000, dbh_cci=1.0, cfg=cfg
+    )
+
+    clean_corrected = corrected["diameter_corrected_cm"].values[:garbage_from]
+    # the clean, well-covered slices should stay close to their raw values,
+    # not get pulled toward the garbage tail's huge diameters
+    assert np.allclose(clean_corrected, clean_diameters[:garbage_from], atol=1.5)
+
+
+def test_apply_monotonic_correction_ignores_trusted_but_implausible_high_slices():
+    """Real-data regression: a handful of slices well above breast height
+    can individually pass the CCI trust bar (well-supported fit) while
+    still measuring something that isn't this tree's own trunk -- e.g. an
+    overlapping neighbour's crown. Left in, these dragged an entire tree's
+    corrected diameter, including clean low slices, up to a single flat
+    ~60cm value even though DBH was 31.8cm."""
+    cfg = ForestMetricsConfig()
+    heights = np.arange(0.1, 15.0, 0.2)
+    diameters = np.full(heights.shape, 30.0)
+    cci = np.full(heights.shape, 1.0)
+    n_points = np.full(heights.shape, 2000.0)
+
+    # A handful of high-height slices that are individually well-covered
+    # (high CCI) but physically impossible given a 31.8cm DBH.
+    for h, d, c in [(12.7, 163.6, 0.825), (13.7, 219.5, 0.825), (14.1, 204.9, 0.85), (14.3, 221.0, 0.9125)]:
+        idx = np.argmin(np.abs(heights - h))
+        diameters[idx] = d
+        cci[idx] = c
+
+    taper_df = pd.DataFrame({"height_m": heights, "diameter_cm": diameters, "cci": cci, "n_points": n_points})
+
+    corrected = apply_monotonic_correction(
+        taper_df, dbh_cm=31.8, dbh_height_m=1.3, dbh_n_points=2000, dbh_cci=1.0, cfg=cfg
+    )
+
+    low_corrected = corrected[corrected["height_m"] < 6.0]["diameter_corrected_cm"]
+    assert np.allclose(low_corrected, 30.0, atol=1.0)
+
+
 def test_apply_monotonic_correction_leaves_already_monotonic_curve_close_to_raw():
     cfg = ForestMetricsConfig()
     heights = np.arange(1.6, 10.0, 0.5)
     diameters = 35.0 * (1 - heights / 14.0)
-    taper_df = pd.DataFrame({"height_m": heights, "diameter_cm": diameters, "n_points": 200})
+    taper_df = pd.DataFrame({"height_m": heights, "diameter_cm": diameters, "cci": 1.0, "n_points": 200})
 
-    corrected = apply_monotonic_correction(taper_df, dbh_cm=38.0, dbh_height_m=1.3, dbh_n_points=2000, cfg=cfg)
+    corrected = apply_monotonic_correction(
+        taper_df, dbh_cm=38.0, dbh_height_m=1.3, dbh_n_points=2000, dbh_cci=1.0, cfg=cfg
+    )
 
     values = corrected["diameter_corrected_cm"].values
     assert np.all(np.diff(values) <= 1e-6)
@@ -198,9 +268,11 @@ def test_apply_monotonic_correction_leaves_already_monotonic_curve_close_to_raw(
 
 def test_apply_monotonic_correction_handles_empty_taper():
     cfg = ForestMetricsConfig()
-    empty = pd.DataFrame(columns=["height_m", "diameter_cm", "n_points"])
+    empty = pd.DataFrame(columns=["height_m", "diameter_cm", "cci", "n_points"])
 
-    corrected = apply_monotonic_correction(empty, dbh_cm=np.nan, dbh_height_m=1.3, dbh_n_points=0, cfg=cfg)
+    corrected = apply_monotonic_correction(
+        empty, dbh_cm=np.nan, dbh_height_m=1.3, dbh_n_points=0, dbh_cci=np.nan, cfg=cfg
+    )
 
     assert "diameter_corrected_cm" in corrected.columns
     assert corrected.empty
