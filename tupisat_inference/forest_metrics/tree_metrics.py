@@ -3,8 +3,9 @@ from typing import Tuple
 import numpy as np
 import pandas as pd
 from scipy import optimize as opt
-from scipy.cluster import hierarchy as sch
-from scipy.spatial import ConvexHull, distance_matrix
+from scipy.spatial import ConvexHull, cKDTree, distance_matrix
+from scipy.sparse import coo_matrix
+from scipy.sparse.csgraph import connected_components
 
 from tupisat_inference.forest_metrics.config import ForestMetricsConfig
 from tupisat_inference.forest_metrics.dtm import DTM
@@ -64,13 +65,32 @@ def _sector_occupancy(
     return perct_occupied, n_occupied >= min_n_sectors
 
 
+def _spatial_cluster_labels(xy: np.ndarray, max_dist: float) -> np.ndarray:
+    """Connected-components clustering at a fixed distance threshold --
+    equivalent to single-linkage clustering (e.g. scipy's fclusterdata),
+    but scalable: a KD-tree finds only the point pairs actually within
+    max_dist instead of materializing a full O(n^2) pairwise distance
+    matrix, which real data confirmed can blow up to hundreds of GiB (and,
+    even below that, minutes of runtime per call) for a taper slice with
+    tens of thousands of points on a large real tree."""
+    n = xy.shape[0]
+    if n <= 1:
+        return np.zeros(n, dtype=int)
+    pairs = cKDTree(xy).query_pairs(max_dist, output_type="ndarray")
+    if pairs.shape[0] == 0:
+        return np.arange(n)
+    graph = coo_matrix((np.ones(pairs.shape[0]), (pairs[:, 0], pairs[:, 1])), shape=(n, n))
+    _, labels = connected_components(graph, directed=False)
+    return labels
+
+
 def _largest_point_cluster(X: np.ndarray, Y: np.ndarray, max_dist: float) -> Tuple[np.ndarray, np.ndarray]:
     """Largest spatially-coherent cluster of points, used as a fallback
     when the initial fit fails quality checks -- isolates the stem ring
     from e.g. a branch/foliage cluster caught in the same slice
     (dendromatics.sections.point_clustering)."""
     xy = np.column_stack((X, Y))
-    cluster_id = sch.fclusterdata(xy, max_dist, criterion="distance", metric="euclidean")
+    cluster_id = _spatial_cluster_labels(xy, max_dist)
     counts = np.bincount(cluster_id)
     largest = np.argmax(counts)
     mask = cluster_id == largest
@@ -256,7 +276,15 @@ def compute_height(hag: np.ndarray, cfg: ForestMetricsConfig) -> float:
     return float(np.nanpercentile(hag, cfg.tree_height_percentile))
 
 
-def compute_crown_metrics(tree_xyz: np.ndarray, hag: np.ndarray, tree_height: float, cfg: ForestMetricsConfig) -> dict:
+def compute_crown_metrics(
+    tree_xyz: np.ndarray, hag: np.ndarray, intensity: np.ndarray, tree_height: float, cfg: ForestMetricsConfig
+) -> dict:
+    """Finds crown_base_height_m by scanning height bins bottom-up for the
+    first sustained run where the bin's median LiDAR intensity has dropped
+    below crown_intensity_ratio_threshold of the tree's own trunk-baseline
+    intensity AND its horizontal footprint area has grown beyond
+    crown_area_ratio_threshold of the trunk-baseline footprint area. See
+    config.py for the real-data calibration this is based on."""
     empty = {
         "crown_base_height_m": np.nan,
         "live_crown_ratio": np.nan,
@@ -280,24 +308,72 @@ def compute_crown_metrics(tree_xyz: np.ndarray, hag: np.ndarray, tree_height: fl
     bin_edges = np.arange(0, tree_height + cfg.crown_height_bin_m, cfg.crown_height_bin_m)
     if bin_edges.shape[0] < 2:
         return empty
-    counts, _ = np.histogram(hag, bins=bin_edges)
+    n_bins = bin_edges.shape[0] - 1
+    bin_idx = np.clip(np.digitize(hag, bin_edges) - 1, 0, n_bins - 1)
+    counts = np.bincount(bin_idx, minlength=n_bins)
     if counts.max() == 0:
         return empty
 
-    threshold = cfg.crown_density_fraction * counts.max()
+    cell_x = np.floor(tree_xyz[:, 0] / cfg.crown_footprint_cell_m).astype(np.int64)
+    cell_y = np.floor(tree_xyz[:, 1] / cfg.crown_footprint_cell_m).astype(np.int64)
+
+    # Occupied-cell count per bin, vectorized: one np.unique call over
+    # (bin, cell_x, cell_y) triples for the whole tree, rather than a
+    # per-bin loop each calling np.unique(axis=0) on its own subset -- the
+    # per-bin version dominated this function's runtime on large real
+    # trees (up to ~2M points), since axis=0 uniqueness has real per-call
+    # overhead (sorting + structured-view construction) that a single
+    # combined pass avoids -- verified against real P02 data.
+    combined = np.column_stack([bin_idx, cell_x, cell_y])
+    unique_triples = np.unique(combined, axis=0)
+    area_m2 = np.bincount(unique_triples[:, 0], minlength=n_bins).astype(float) * (cfg.crown_footprint_cell_m ** 2)
+
+    intensity_median = np.full(n_bins, np.nan)
+    for i in range(n_bins):
+        sel = bin_idx == i
+        if np.any(sel):
+            intensity_median[i] = np.median(intensity[sel])
+
+    bin_mid = (bin_edges[:-1] + bin_edges[1:]) / 2
+    base_eligible = (bin_mid <= cfg.dbh_height_m) & (counts >= cfg.crown_baseline_min_points_per_bin)
+    if not np.any(base_eligible):
+        base_eligible = bin_mid <= cfg.dbh_height_m
+    if not np.any(base_eligible):
+        return empty
+
+    intensity0 = np.nanmedian(intensity_median[base_eligible])
+    area0 = np.median(area_m2[base_eligible])
+    if not np.isfinite(intensity0) or intensity0 <= 0 or not np.isfinite(area0) or area0 <= 0:
+        return empty
+
+    norm_intensity = intensity_median / intensity0
+    norm_area = area_m2 / area0
+
     crown_base_bin = None
     run = 0
-    for i in range(len(counts) - 1, -1, -1):
-        if counts[i] >= threshold:
+    run_start_bin = None
+    for i in range(n_bins):
+        if counts[i] < cfg.crown_min_points_per_bin:
+            continue  # too few points to trust this bin's value; skip without breaking the run
+        is_crown_bin = (
+            norm_intensity[i] < cfg.crown_intensity_ratio_threshold
+            and norm_area[i] > cfg.crown_area_ratio_threshold
+        )
+        if is_crown_bin:
+            if run == 0:
+                run_start_bin = i
             run += 1
             if run >= cfg.crown_min_consecutive_bins:
-                crown_base_bin = i
+                crown_base_bin = run_start_bin
+                break
         else:
             run = 0
+
     if crown_base_bin is None:
-        # No stretch of bins met the consecutive-bin requirement; treat the
-        # single highest-density bin as the crown base instead of giving up.
-        crown_base_bin = int(np.argmax(counts))
+        # No clear trunk -> crown transition found. Rather than guess with
+        # a weaker fallback, report no crown split at all; measure_tree
+        # falls back to the tree's full height.
+        return empty
 
     crown_base_height = bin_edges[crown_base_bin]
     empty["crown_base_height_m"] = float(crown_base_height)
@@ -440,17 +516,24 @@ def apply_monotonic_correction(taper_df: pd.DataFrame, cfg: ForestMetricsConfig)
     return taper_df
 
 
-def measure_tree(tree_id: int, tree_df: pd.DataFrame, dtm: DTM, cfg: ForestMetricsConfig) -> Tuple[dict, pd.DataFrame]:
+def measure_tree(
+    tree_id: int, tree_df: pd.DataFrame, dtm: DTM, cfg: ForestMetricsConfig
+) -> Tuple[dict, pd.DataFrame, np.ndarray]:
     """Top-level per-tree measurement pipeline. Never raises for data-quality
     problems -- always returns a row (possibly mostly NaN) plus a taper
     DataFrame. row["is_valid_tree"] is False for segmented instances that
     don't pass the tree-vs-shrub/plot-edge-fragment check (too short to
     reach tree_validation_height_m, or lacking a consistent, well-covered
     circular cross-section at several heights below it) -- forest_metrics.py
-    drops those entirely rather than including them in any output."""
+    drops those entirely rather than including them in any output. The
+    third return value is a per-point boolean mask (aligned to tree_df's
+    row order), True for points at/above crown_base_height_m -- used by
+    forest_metrics.py to write a crown/not-crown scalar field back onto
+    the point cloud for visual inspection."""
     flags = []
 
     tree_xyz = tree_df[["X", "Y", "Z"]].values
+    intensity = tree_df["intensity"].values
     n_points = int(tree_xyz.shape[0])
     if n_points < cfg.min_points_per_tree:
         flags.append("too_few_points")
@@ -470,7 +553,10 @@ def measure_tree(tree_id: int, tree_df: pd.DataFrame, dtm: DTM, cfg: ForestMetri
             flags.append("no_dbh_slice")
 
     height_m = compute_height(hag, cfg)
-    crown = compute_crown_metrics(tree_xyz, hag, height_m, cfg)
+    crown = compute_crown_metrics(tree_xyz, hag, intensity, height_m, cfg)
+    is_crown_point = (
+        hag >= crown["crown_base_height_m"] if np.isfinite(crown["crown_base_height_m"]) else np.zeros(n_points, dtype=bool)
+    )
 
     # Diameters are only meaningful -- and only reported -- below the crown.
     # crown_base_height_m can fall slightly above tree_height (its bin edges
@@ -540,4 +626,4 @@ def measure_tree(tree_id: int, tree_df: pd.DataFrame, dtm: DTM, cfg: ForestMetri
     row.update(dbh)
     row.update(crown)
 
-    return row, taper_df
+    return row, taper_df, is_crown_point

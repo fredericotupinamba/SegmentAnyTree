@@ -1,7 +1,28 @@
 import numpy as np
 import pandas as pd
-from scipy.cluster import hierarchy as sch
+from scipy.spatial import cKDTree
 from scipy.spatial.distance import pdist
+from scipy.sparse import coo_matrix
+from scipy.sparse.csgraph import connected_components
+
+
+def _spatial_cluster_labels(xy: np.ndarray, max_dist: float) -> np.ndarray:
+    """Connected-components clustering at a fixed distance threshold --
+    equivalent to single-linkage clustering (e.g. scipy's fclusterdata),
+    but scalable: a KD-tree finds only the point pairs actually within
+    max_dist instead of materializing a full O(n^2) pairwise distance
+    matrix, which measured at hundreds of GiB for a real dense base slice
+    with hundreds of thousands of points (see caller for the voxelization
+    that bounds the input further still)."""
+    n = xy.shape[0]
+    if n <= 1:
+        return np.zeros(n, dtype=int)
+    pairs = cKDTree(xy).query_pairs(max_dist, output_type="ndarray")
+    if pairs.shape[0] == 0:
+        return np.arange(n)
+    graph = coo_matrix((np.ones(pairs.shape[0]), (pairs[:, 0], pairs[:, 1])), shape=(n, n))
+    _, labels = connected_components(graph, directed=False)
+    return labels
 
 
 def split_merged_instances(
@@ -87,7 +108,7 @@ def split_merged_instances(
             continue
         voxel_centers = (voxel_xy + 0.5) * voxel_size_m
 
-        cluster_id = sch.fclusterdata(voxel_centers, stem_cluster_distance_m, criterion="distance", metric="euclidean")
+        cluster_id = _spatial_cluster_labels(voxel_centers, stem_cluster_distance_m)
         labels = np.unique(cluster_id)
 
         # Point-weighted count per cluster (a voxel's weight is how many

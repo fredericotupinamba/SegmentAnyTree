@@ -11,6 +11,7 @@ REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__fi
 if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
 
+import numpy as np
 import pandas as pd
 
 from tupisat_inference.las_to_pandas import las_to_pandas
@@ -24,6 +25,7 @@ from tupisat_inference.forest_metrics.visualization import (
     build_base_marker_points,
     build_diameter_circle_points,
     build_label_points,
+    write_crown_classification_laz,
 )
 
 TAPER_COLUMNS = [
@@ -31,7 +33,7 @@ TAPER_COLUMNS = [
     "tilt_outlier_prob", "diameter_corrected_cm",
 ]
 
-REQUIRED_COLUMNS = ("X", "Y", "Z", "PredSemantic", "PredInstance")
+REQUIRED_COLUMNS = ("X", "Y", "Z", "intensity", "PredSemantic", "PredInstance")
 
 
 class ForestMetrics(object):
@@ -76,11 +78,17 @@ class ForestMetrics(object):
 
         rows = []
         taper_frames = []
+        # Aligned 1:1 with df's (and so the original file's) point order --
+        # scattered into per-tree during the loop below, left at 0 (not
+        # crown) for every non-tree point and every tree point below its
+        # own crown_base_height_m.
+        is_crown_full = np.zeros(len(df), dtype=np.uint8)
         n_instances = tree_pts_df["PredInstance"].nunique() if not tree_pts_df.empty else 0
         self._log(f"Measuring {n_instances} segmented instance(s)")
 
         for tree_id, group in tree_pts_df.groupby("PredInstance"):
-            row, taper_df = measure_tree(int(tree_id), group, dtm, self.cfg)
+            row, taper_df, is_crown_point = measure_tree(int(tree_id), group, dtm, self.cfg)
+            is_crown_full[group.index.to_numpy()] = is_crown_point.astype(np.uint8)
             row.update(volume_by_log_assortment(taper_df, row["height_m"], self.cfg, diameter_column="diameter_corrected_cm"))
             row["stem_volume_taper_m3"] = integrate_taper_to_volume_m3(
                 taper_df, row["height_m"], self.cfg, diameter_column="diameter_corrected_cm"
@@ -118,10 +126,14 @@ class ForestMetrics(object):
         diameter_circles_df = build_diameter_circle_points(tree_metrics_df, taper_df_all, dtm, self.cfg)
         labels_df = build_label_points(tree_metrics_df, dtm, self.cfg)
 
-        self._write_outputs(tree_metrics_df, taper_df_all, plot_summary, base_markers_df, diameter_circles_df, labels_df)
+        self._write_outputs(
+            tree_metrics_df, taper_df_all, plot_summary, base_markers_df, diameter_circles_df, labels_df, is_crown_full
+        )
         self._log(f"Wrote outputs for {n_trees} tree(s) to {self.output_dir}")
 
-    def _write_outputs(self, tree_metrics_df, taper_df_all, plot_summary, base_markers_df, diameter_circles_df, labels_df):
+    def _write_outputs(
+        self, tree_metrics_df, taper_df_all, plot_summary, base_markers_df, diameter_circles_df, labels_df, is_crown_full
+    ):
         os.makedirs(self.output_dir, exist_ok=True)
         tree_metrics_df.to_csv(os.path.join(self.output_dir, f"{self.stem}_tree_metrics.csv"), index=False)
         taper_df_all.to_csv(os.path.join(self.output_dir, f"{self.stem}_taper.csv"), index=False)
@@ -144,6 +156,17 @@ class ForestMetrics(object):
                 output_file_path=os.path.join(self.output_dir, f"{self.stem}_{name}.las"),
                 do_compress=True,
             )
+
+        # Adds an IsCrown (0/1) scalar field directly onto the input point
+        # cloud (overwriting it in place) -- lets the crown/not-crown split
+        # from compute_crown_metrics be inspected directly in a point cloud
+        # viewer, the same way PredSemantic/PredInstance already can be.
+        # Writes to the same path it read from rather than a separate
+        # "_crown_classified.laz" copy: the two were near-duplicates of a
+        # very large file (the full point cloud), doubling disk usage for
+        # no benefit once the classification is trustworthy enough to want
+        # by default.
+        write_crown_classification_laz(self.input_las_path, is_crown_full)
 
 
 if __name__ == "__main__":

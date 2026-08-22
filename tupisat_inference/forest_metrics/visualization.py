@@ -1,5 +1,6 @@
 import os
 
+import laspy
 import numpy as np
 import pandas as pd
 
@@ -81,6 +82,27 @@ def cross_marker_points(x: float, y: float, z: float, size_m: float, points_per_
     arm_y = np.column_stack([np.full(points_per_arm, x), y + offsets, np.full(points_per_arm, z)])
     arm_z = np.column_stack([np.full(points_per_arm, x), np.full(points_per_arm, y), z + offsets])
     return np.vstack([arm_x, arm_y, arm_z])
+
+
+def write_crown_classification_laz(las_path: str, is_crown: np.ndarray) -> None:
+    """Adds an IsCrown scalar field (uint8, 0/1) directly onto `las_path`,
+    overwriting it in place -- lets the crown/not-crown split be inspected
+    directly in a point cloud viewer (CloudCompare, etc.), the same way
+    PredSemantic/PredInstance already can be. `is_crown` must be aligned
+    1:1 with the file's own point order (e.g. built from the same
+    las_to_pandas DataFrame for that file, never reordered/filtered).
+    Reads the whole file into memory before writing, so overwriting the
+    same path it read from is safe (no read-while-writing race)."""
+    las = laspy.read(las_path)
+    if len(las.points) != is_crown.shape[0]:
+        raise ValueError(
+            f"is_crown length {is_crown.shape[0]} does not match point count "
+            f"{len(las.points)} in {las_path}"
+        )
+    if "IsCrown" not in las.point_format.dimension_names:
+        las.add_extra_dim(laspy.ExtraBytesParams(name="IsCrown", type="uint8"))
+    las.IsCrown = is_crown.astype(np.uint8)
+    las.write(las_path)
 
 
 def build_base_marker_points(tree_metrics_df: pd.DataFrame, cfg: ForestMetricsConfig) -> pd.DataFrame:

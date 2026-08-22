@@ -104,10 +104,50 @@ class ForestMetricsConfig:
     min_high_cci_slices: int = 3
     min_valid_dbh_cm: float = 7.0
 
-    # Crown metrics.
-    crown_height_bin_m: float = 0.5
-    crown_density_fraction: float = 0.3
-    crown_min_consecutive_bins: int = 3
+    # Crown metrics. crown_base_height_m is found by a bottom-up scan of
+    # height bins, looking for the first sustained run where LiDAR
+    # intensity has dropped relative to the tree's own trunk baseline AND
+    # the horizontal footprint area has grown relative to it. Calibrated
+    # against 58 real, visually-labeled crown base heights across two
+    # plots (P01/P02): mean absolute error 1.26m fit on all 58 trees,
+    # 1.29m/1.53m under leave-one-plot-out cross-validation, vs. 3.37m for
+    # the point-density-only heuristic this replaced (a densely-scanned
+    # TLS tree can have roughly uniform point density top to bottom, so
+    # density alone finds false transitions partway up the trunk).
+    # Intensity separates real trunk (bark) from foliage far better than
+    # local point geometry -- a from-scratch sphericity-based classifier
+    # was tried first and found to not discriminate wood from foliage at
+    # all on this real data (near-identical distributions in both
+    # regions); intensity showed a real, consistent gap (trunk-base
+    # median 2.7-4.4x higher than crown-top median across sample trees).
+    # A third condition (point density above its own trunk baseline) was
+    # tested too -- it also increases into the crown, but adding it as a
+    # requirement was not consistently better across the two calibration
+    # plots (helped one direction of cross-validation, hurt the other),
+    # so it's left out in favor of the simpler two-feature rule.
+    crown_height_bin_m: float = 0.25
+    # Horizontal grid cell size for the footprint-area proxy: number of
+    # occupied cells at this resolution x cell area, not a convex hull --
+    # robust to a single stray branch point inflating the footprint the
+    # way a hull's outer boundary would.
+    crown_footprint_cell_m: float = 0.10
+    # Minimum points in a bin to trust its intensity/footprint-area value
+    # when *evaluating* whether that bin is crown -- an emptier bin is
+    # skipped without breaking the current consecutive-bin run, not
+    # treated as evidence either way.
+    crown_min_points_per_bin: int = 10
+    # Minimum points in a trunk-region bin (height <= dbh_height_m) to
+    # trust it when computing the tree's own trunk intensity/area
+    # baseline; falls back to using all trunk-region bins if none clear
+    # this (only for very sparse trees).
+    crown_baseline_min_points_per_bin: int = 15
+    # A bin counts as crown once its median intensity has dropped below
+    # this fraction of the tree's trunk-baseline intensity...
+    crown_intensity_ratio_threshold: float = 0.4
+    # ...AND its footprint area has grown beyond this multiple of the
+    # tree's trunk-baseline footprint area.
+    crown_area_ratio_threshold: float = 2.5
+    crown_min_consecutive_bins: int = 5
     crown_voxel_size_m: float = 0.25
 
     # Taper / volume. No fixed max height: sampling always stops at each
