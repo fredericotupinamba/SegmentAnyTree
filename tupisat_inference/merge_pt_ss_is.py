@@ -15,22 +15,25 @@ from tupisat_inference.ply_to_pandas import ply_to_pandas
 from tupisat_inference.las_to_pandas import las_to_pandas
 from tupisat_inference.pandas_to_ply import pandas_to_ply
 from tupisat_inference.pandas_to_las import pandas_to_las
+from tupisat_inference.split_merged_instances import split_merged_instances
 
 
 class MergePtSsIs(object):
-    def __init__(self, 
-                 point_cloud, 
-                 semantic_segmentation, 
-                 instance_segmentation, 
+    def __init__(self,
+                 point_cloud,
+                 semantic_segmentation,
+                 instance_segmentation,
                  output_file_path,
-                 verbose=False
+                 verbose=False,
+                 split_merged_tree_instances=True,
                  ):
-        
+
         self.point_cloud = point_cloud
         self.semantic_segmentation = semantic_segmentation
         self.instance_segmentation = instance_segmentation
         self.output_file_path = output_file_path
         self.verbose = verbose
+        self.split_merged_tree_instances = split_merged_tree_instances
 
 
     def parallel_join(self, df1_chunk, df2, on_columns, how_type):
@@ -127,6 +130,22 @@ class MergePtSsIs(object):
         # an unsigned integer type, which does not support NaNs.
         merged_df['PredInstance'] = merged_df['PredInstance'].fillna(0)
 
+        if self.split_merged_tree_instances:
+            # The instance segmentation network clusters points per
+            # inference block and merges across blocks by point-ID IoU --
+            # nothing in that pipeline checks whether a resulting instance
+            # is spatially contiguous, so two adjacent trees whose canopies
+            # overlap can end up sharing one instance ID. Verified on real
+            # data: two stems 3.6m apart at the base, fused into one
+            # instance, tanked its measured diameters downstream in
+            # forest_metrics. See split_merged_instances() for the fix.
+            merged_df = split_merged_instances(
+                merged_df,
+                x_col='x', y_col='y', z_col='z',
+                semantic_col='PredSemantic', instance_col='PredInstance',
+                verbose=self.verbose,
+            )
+
         return merged_df
     
     def save(self, merged_df):
@@ -210,7 +229,10 @@ if __name__ == "__main__":
     parser.add_argument('-is', '--instance_segmentation', help='Path to the instance segmentation file.')
     parser.add_argument('-o', '--output_file_path', help='Path to the output file.')
     parser.add_argument('-v', '--verbose', action='store_true', help='Print verbose output.')
-    
+    parser.add_argument('--no-split-merged-instances', action='store_true',
+                         help='Disable the post-processing step that splits a predicted tree instance '
+                              'into separate instances when it contains multiple spatially separate stems.')
+
     # generate help message if no arguments are provided
     if len(sys.argv)==1:
         parser.print_help(sys.stderr)
@@ -224,6 +246,7 @@ if __name__ == "__main__":
     INSTANCE_SEGMENTATION = args['instance_segmentation']
     OUTPUT_FILE_PATH = args['output_file_path']
     VERBOSE = args['verbose']
+    SPLIT_MERGED_INSTANCES = not args['no_split_merged_instances']
 
 
 
@@ -233,7 +256,8 @@ if __name__ == "__main__":
         semantic_segmentation=SEMANTIC_SEGMENTATION,
         instance_segmentation=INSTANCE_SEGMENTATION,
         output_file_path=OUTPUT_FILE_PATH,
-        verbose=VERBOSE
+        verbose=VERBOSE,
+        split_merged_tree_instances=SPLIT_MERGED_INSTANCES,
         )()
     
 
