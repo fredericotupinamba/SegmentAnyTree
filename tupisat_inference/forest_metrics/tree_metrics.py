@@ -2,8 +2,9 @@ from typing import Tuple
 
 import numpy as np
 import pandas as pd
-from scipy.spatial import ConvexHull
-from skimage.measure import CircleModel, ransac
+from scipy import optimize as opt
+from scipy.cluster import hierarchy as sch
+from scipy.spatial import ConvexHull, distance_matrix
 
 from tupisat_inference.forest_metrics.config import ForestMetricsConfig
 from tupisat_inference.forest_metrics.dtm import DTM
@@ -11,82 +12,182 @@ from tupisat_inference.forest_metrics.dtm import DTM
 NAN_CIRCLE = (np.nan, np.nan, np.nan, np.nan)
 
 
-def fit_circle_ransac(points_xy: np.ndarray, cfg: ForestMetricsConfig, max_trials: int) -> Tuple[float, float, float, float]:
-    """RANSAC circle fit on a horizontal slice of points.
-    Returns (xc, yc, radius_m, cci); all NaN if there aren't enough points
-    or the fit fails."""
+# -----------------------------------------------------------------------------
+# Circle fitting, ported from 3DFin/dendromatics' dendromatics/sections.py
+# (fit_circle, inner_circle, sector_occupancy, point_clustering,
+# fit_circle_check). Pure numpy/scipy, no new dependency. Replaces an
+# earlier RANSAC-based fit (skimage CircleModel) that had no equivalent of
+# fit_circle_check's spatial-clustering fallback -- a branch/foliage
+# cluster caught in the same horizontal slice as the stem could pull a
+# RANSAC fit off badly depending on tuning, with no recovery path.
+# -----------------------------------------------------------------------------
+
+
+def _lsq_fit_circle(X: np.ndarray, Y: np.ndarray) -> Tuple[float, float, float]:
+    """Least-squares circle fit (dendromatics.sections.fit_circle)."""
+
+    def _radii(xc, yc):
+        return np.hypot(X - xc, Y - yc)
+
+    def _residuals(c):
+        r = _radii(*c)
+        return r - r.mean()
+
+    center, _ = opt.leastsq(_residuals, (X.mean(), Y.mean()), maxfev=2000)
+    radius = _radii(*center).mean()
+    return center[0], center[1], radius
+
+
+def _inner_circle_point_count(X: np.ndarray, Y: np.ndarray, xc: float, yc: float, r: float, times_r: float) -> int:
+    """Points falling inside a circle shrunk by `times_r` -- a good fit
+    should have its points on the ring, not bunched near the center
+    (dendromatics.sections.inner_circle)."""
+    dist = np.hypot(X - xc, Y - yc)
+    return int(np.sum(dist < r * times_r))
+
+
+def _sector_occupancy(
+    X: np.ndarray, Y: np.ndarray, xc: float, yc: float, r: float, n_sectors: int, min_n_sectors: int, width: float
+) -> Tuple[float, bool]:
+    """Percentage of angular sectors around the fitted circle that contain
+    a point within `width` of the fitted radius, and whether that meets
+    `min_n_sectors` (dendromatics.sections.sector_occupancy)."""
+    dx, dy = X - xc, Y - yc
+    radial = np.hypot(dx, dy)
+    angular = np.arctan2(dx, dy)
+
+    within_band = (radial > (r - width)) & (radial < (r + width))
+    sector_idx = np.floor(angular[within_band] / (2 * np.pi / n_sectors))
+    n_occupied = np.unique(sector_idx).size
+
+    perct_occupied = n_occupied * 100 / n_sectors
+    return perct_occupied, n_occupied >= min_n_sectors
+
+
+def _largest_point_cluster(X: np.ndarray, Y: np.ndarray, max_dist: float) -> Tuple[np.ndarray, np.ndarray]:
+    """Largest spatially-coherent cluster of points, used as a fallback
+    when the initial fit fails quality checks -- isolates the stem ring
+    from e.g. a branch/foliage cluster caught in the same slice
+    (dendromatics.sections.point_clustering)."""
+    xy = np.column_stack((X, Y))
+    cluster_id = sch.fclusterdata(xy, max_dist, criterion="distance", metric="euclidean")
+    counts = np.bincount(cluster_id)
+    largest = np.argmax(counts)
+    mask = cluster_id == largest
+    return X[mask], Y[mask]
+
+
+def _fit_circle_check(
+    X: np.ndarray,
+    Y: np.ndarray,
+    cfg: ForestMetricsConfig,
+    allow_cluster_fallback: bool = True,
+) -> Tuple[float, float, float, float, int]:
+    """Fits a circle and validates it via inner-circle + sector-occupancy
+    checks; on failure, retries once on the largest spatial point cluster
+    (dendromatics.sections.fit_circle_check, recursive fallback capped at
+    one retry). Returns (xc, yc, r, sector_perct, n_points_in); r is 0 if
+    no valid fit could be produced."""
+    if X.size <= cfg.min_points_for_circle_fit:
+        return 0.0, 0.0, 0.0, 0.0, 0
+
+    xc, yc, r = _lsq_fit_circle(X, Y)
+    n_points_in = _inner_circle_point_count(X, Y, xc, yc, r, cfg.circle_diameter_proportion)
+    sector_perct, enough_sectors = _sector_occupancy(
+        X, Y, xc, yc, r, cfg.circle_n_sectors, cfg.circle_min_occupied_sectors, cfg.circle_sector_width_m
+    )
+
+    fit_is_bad = (
+        n_points_in > cfg.circle_inner_points_threshold
+        or r < cfg.circle_min_radius_m
+        or 2 * r * 100 > cfg.max_plausible_diameter_cm
+        or not enough_sectors
+    )
+    if fit_is_bad and allow_cluster_fallback:
+        X_g, Y_g = _largest_point_cluster(X, Y, cfg.circle_max_point_distance_m)
+        if X_g.size > cfg.min_points_for_circle_fit:
+            return _fit_circle_check(X_g, Y_g, cfg, allow_cluster_fallback=False)
+        return 0.0, 0.0, 0.0, 0.0, 0
+
+    return xc, yc, r, sector_perct, n_points_in
+
+
+def fit_circle_robust(points_xy: np.ndarray, cfg: ForestMetricsConfig) -> Tuple[float, float, float, float]:
+    """Fit a circle to a horizontal slice of points via the dendromatics
+    fit_circle_check pipeline. Returns (xc, yc, radius_m, cci); all NaN if
+    there aren't enough points or no valid fit could be produced. `cci` is
+    the fraction (0-1) of angular sectors around the ring that contain a
+    point -- same role and scale as the earlier ring-based CCI."""
     n = points_xy.shape[0]
     if n < cfg.min_points_for_circle_fit:
         return NAN_CIRCLE
 
-    # min_samples grows with slice density in principle, but a dense TLS
-    # slice can have hundreds of points -- capping it keeps each RANSAC
-    # trial's per-sample circle fit cheap without hurting robustness (a
-    # circle only needs 3 points; a few dozen already gives a solid,
-    # outlier-resistant fit).
-    min_samples = min(max(3, int(0.3 * n)), cfg.circle_ransac_min_samples_cap)
-
     # points_xy arrives in real-world UTM-scale coordinates (6-7 digit
-    # values). skimage 0.16.2's CircleModel (pinned in production) solves
-    # the fit via a plain least-squares linear system that is numerically
-    # unstable at that magnitude -- verified against real data: fitting a
-    # perfectly clean, dense 2000-point stem ring in raw coordinates
-    # produced a "circle" with a ~2,300,000 m radius, while the same points
-    # shifted to be centered on zero fit correctly (radius ~0.16 m).
-    # Newer skimage tolerates raw coordinates fine, which is why this only
-    # showed up running against the actual pinned Docker environment, not
-    # local testing with an unpinned newer skimage. Center before fitting,
-    # then shift the result back.
+    # values); centering on the centroid before fitting avoids the
+    # numerical instability plain least-squares circle fits can hit at
+    # that magnitude (verified against real data with the previous
+    # skimage-based fit -- see git history).
     centroid = points_xy.mean(axis=0)
-    centered_xy = points_xy - centroid
+    X = points_xy[:, 0] - centroid[0]
+    Y = points_xy[:, 1] - centroid[1]
 
-    try:
-        model, inliers = ransac(
-            centered_xy,
-            CircleModel,
-            min_samples=min_samples,
-            residual_threshold=cfg.circle_ransac_residual_threshold_m,
-            max_trials=max_trials,
-        )
-    except (ValueError, np.linalg.LinAlgError):
-        return NAN_CIRCLE
-
-    # Older skimage returns None on a failed fit; newer skimage returns a
-    # FailedEstimation object that is falsy but raises on attribute access
-    # (e.g. "not enough significant data points", "no inliers found") --
-    # bool() is the version-agnostic way to detect either case.
-    if model is None or not model:
-        return NAN_CIRCLE
-
-    xc, yc, r = model.params
+    xc, yc, r, sector_perct, _ = _fit_circle_check(X, Y, cfg)
     if not np.isfinite(r) or r <= 0 or 2 * r * 100 > cfg.max_plausible_diameter_cm:
         return NAN_CIRCLE
-    xc, yc = xc + centroid[0], yc + centroid[1]
 
-    cci = circumferential_completeness_index((xc, yc), r, points_xy)
-    return xc, yc, r, cci
+    return xc + centroid[0], yc + centroid[1], r, sector_perct / 100
 
 
-def circumferential_completeness_index(
-    center_xy: Tuple[float, float], radius: float, points_xy: np.ndarray, sector_deg: float = 4.5
-) -> float:
-    """Fraction of angular sectors around the fitted circle that contain at
-    least one point within [0.8r, 1.2r] of the center."""
-    if radius <= 0 or points_xy.shape[0] == 0:
-        return 0.0
+# -----------------------------------------------------------------------------
+# tilt_detection, ported from dendromatics/sections.py and adapted to run on
+# one tree's sections at a time (dendromatics batches all trees into 2D
+# matrices; measure_tree already processes one tree per call). Flags a
+# section whose fitted circle center deviates from the tree's other section
+# centers -- a fit "pulled sideways" (e.g. by a branch cluster) can still
+# pass the radius/coverage checks above while being centered on the wrong
+# spot.
+# -----------------------------------------------------------------------------
 
-    xc, yc = center_xy
-    dx = points_xy[:, 0] - xc
-    dy = points_xy[:, 1] - yc
-    dist = np.hypot(dx, dy)
-    ring_mask = (dist >= 0.8 * radius) & (dist <= 1.2 * radius)
-    if not np.any(ring_mask):
-        return 0.0
 
-    angles_deg = np.degrees(np.arctan2(dy[ring_mask], dx[ring_mask])) % 360
-    n_sectors = int(np.ceil(360 / sector_deg))
-    sector_idx = np.floor(angles_deg / sector_deg).astype(int)
-    return len(np.unique(sector_idx)) / n_sectors
+def _outlier_flags(values: np.ndarray, n_range: float = 1.5) -> np.ndarray:
+    q1, q3 = np.quantile(values, [0.25, 0.75])
+    iqr = q3 - q1
+    lower, upper = q1 - iqr * n_range, q3 + iqr * n_range
+    return ((values < lower) | (values > upper)).astype(float)
+
+
+def tilt_outlier_prob(
+    x_centers: np.ndarray, y_centers: np.ndarray, radii: np.ndarray, heights: np.ndarray, w_1: float = 3.0, w_2: float = 1.0
+) -> np.ndarray:
+    """Outlier score (0-1) per section: a weighted sum of how tilted a
+    section's center is relative to *all* other section centers (absolute)
+    and relative to each individual other section (relative). Sections with
+    radius <= 0 (no valid fit) always score 0."""
+    outlier_prob = np.zeros_like(x_centers, dtype=float)
+    valid = radii > 0
+    n_valid = int(np.sum(valid))
+    if n_valid < 3:
+        return outlier_prob
+
+    abs_w = w_1 / (n_valid * w_2 + w_1)
+    rel_w = w_2 / (n_valid * w_2 + w_1)
+
+    h = heights[valid].reshape(-1, 1)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        z_dist = distance_matrix(h, h)
+        xy_dist = distance_matrix(np.column_stack((x_centers[valid], y_centers[valid])), np.column_stack((x_centers[valid], y_centers[valid])))
+        tilt_matrix = np.degrees(np.arctan(xy_dist / z_dist))
+
+    valid_idx = np.flatnonzero(valid)
+    outlier_prob[valid_idx] = _outlier_flags(np.nansum(tilt_matrix, axis=0)) * abs_w
+
+    others_mask = ~np.eye(n_valid, dtype=bool)
+    for j in range(n_valid):
+        row_excl_self = tilt_matrix[j][others_mask[j]]
+        row = np.where(np.arange(n_valid) == j, np.median(row_excl_self), tilt_matrix[j])
+        outlier_prob[valid_idx] += _outlier_flags(row) * rel_w
+
+    return outlier_prob
 
 
 def compute_tree_base(tree_xyz: np.ndarray, hag: np.ndarray, dtm: DTM, cfg: ForestMetricsConfig) -> Tuple[float, float, float]:
@@ -106,7 +207,7 @@ def compute_tree_base(tree_xyz: np.ndarray, hag: np.ndarray, dtm: DTM, cfg: Fore
 
 def _diameter_at_height(
     tree_xyz: np.ndarray, hag: np.ndarray, height_m: float, half_thickness_m: float,
-    cfg: ForestMetricsConfig, max_trials: int,
+    cfg: ForestMetricsConfig,
 ) -> dict:
     """Fit a single dedicated circle to a horizontal slice at `height_m`,
     shared by compute_dbh (1.3m) and the tree-validation check at
@@ -117,7 +218,7 @@ def _diameter_at_height(
     slice_mask = np.abs(hag - height_m) <= half
     slice_xy = tree_xyz[slice_mask, :2]
 
-    xc, yc, r, cci = fit_circle_ransac(slice_xy, cfg, max_trials=max_trials)
+    xc, yc, r, cci = fit_circle_robust(slice_xy, cfg)
     diameter_cm = 2 * r * 100 if np.isfinite(r) else np.nan
     if np.isfinite(diameter_cm) and cci < cfg.min_cci_for_valid_dbh:
         diameter_cm = np.nan
@@ -137,7 +238,7 @@ def compute_dbh(tree_xyz: np.ndarray, hag: np.ndarray, cfg: ForestMetricsConfig)
     # fit itself "succeeds" -- verified against real TLS data, where sub-0.3
     # CCI fits averaged 2-4x the diameter of well-covered ones. Below the
     # threshold, the value isn't usable even as an estimate.
-    fit = _diameter_at_height(tree_xyz, hag, cfg.dbh_height_m, cfg.dbh_slice_thickness_m, cfg, cfg.dbh_ransac_max_trials)
+    fit = _diameter_at_height(tree_xyz, hag, cfg.dbh_height_m, cfg.dbh_slice_thickness_m, cfg)
     return {
         "dbh_cm": fit["diameter_cm"],
         "dbh_cci": fit["cci"],
@@ -232,7 +333,7 @@ def compute_taper(tree_xyz: np.ndarray, hag: np.ndarray, max_height_m: float, cf
     caller should pass as the commercial/merchantable trunk height (e.g.
     crown_base_height_m), not the tree's full height -- crown diameters
     aren't meaningful trunk taper and shouldn't be measured or reported."""
-    columns = ["height_m", "diameter_cm", "cci", "n_points", "center_x", "center_y"]
+    columns = ["height_m", "diameter_cm", "cci", "n_points", "center_x", "center_y", "tilt_outlier_prob"]
     if not np.isfinite(max_height_m) or max_height_m <= cfg.taper_height_min_m:
         return pd.DataFrame(columns=columns)
 
@@ -244,7 +345,7 @@ def compute_taper(tree_xyz: np.ndarray, hag: np.ndarray, max_height_m: float, cf
         slice_xy = tree_xyz[slice_mask, :2]
         n_points = int(slice_xy.shape[0])
         if n_points >= cfg.min_points_for_taper_slice:
-            xc, yc, r, cci = fit_circle_ransac(slice_xy, cfg, max_trials=cfg.taper_ransac_max_trials)
+            xc, yc, r, cci = fit_circle_robust(slice_xy, cfg)
             diameter_cm = 2 * r * 100 if np.isfinite(r) else np.nan
             # Same low-coverage failure mode as compute_dbh: keep cci for
             # diagnostics but don't feed an unreliable diameter into volume.
@@ -254,9 +355,30 @@ def compute_taper(tree_xyz: np.ndarray, hag: np.ndarray, max_height_m: float, cf
                 xc, yc = np.nan, np.nan
         else:
             diameter_cm, cci, xc, yc = np.nan, np.nan, np.nan, np.nan
-        rows.append((h, diameter_cm, cci, n_points, xc, yc))
+        rows.append((h, diameter_cm, cci, n_points, xc, yc, 0.0))
 
-    return pd.DataFrame(rows, columns=columns)
+    taper_df = pd.DataFrame(rows, columns=columns)
+
+    # tilt_detection (ported from dendromatics): a section whose fitted
+    # center is off-axis relative to the tree's other sections is a
+    # different failure mode than poor radial coverage -- the fit can look
+    # numerically fine (good CCI) while being centered on e.g. a branch
+    # cluster rather than the stem. Needs every section's center at once,
+    # so it runs as a second pass after the per-height loop above.
+    radius_cm = taper_df["diameter_cm"].to_numpy(dtype=float) / 2
+    radius_cm = np.nan_to_num(radius_cm, nan=0.0)
+    tilt_prob = tilt_outlier_prob(
+        taper_df["center_x"].to_numpy(dtype=float),
+        taper_df["center_y"].to_numpy(dtype=float),
+        radius_cm,
+        taper_df["height_m"].to_numpy(dtype=float),
+    )
+    taper_df["tilt_outlier_prob"] = tilt_prob
+
+    tilt_flagged = tilt_prob > cfg.tilt_outlier_threshold
+    taper_df.loc[tilt_flagged, ["diameter_cm", "center_x", "center_y"]] = np.nan
+
+    return taper_df
 
 
 def apply_monotonic_correction(taper_df: pd.DataFrame, cfg: ForestMetricsConfig) -> pd.DataFrame:

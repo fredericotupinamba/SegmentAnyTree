@@ -36,16 +36,49 @@ class ForestMetricsConfig:
     dbh_height_m: float = 1.3
     dbh_slice_thickness_m: float = 0.1
     min_points_for_circle_fit: int = 10
-    circle_ransac_residual_threshold_m: float = 0.02
-    circle_ransac_min_samples_cap: int = 30
-    dbh_ransac_max_trials: int = 1000
-    taper_ransac_max_trials: int = 150
+    # Circle fit + validation, ported from 3DFin/dendromatics'
+    # sections.py (fit_circle / inner_circle / sector_occupancy /
+    # fit_circle_check). Defaults below are 3DFin's own published defaults
+    # (AdvancedParameters/ExpertParameters in three_d_fin.processing.
+    # configuration), except min_points_for_circle_fit above -- 3DFin
+    # defaults that gate to 80 points minimum, a hard rejection rather than
+    # a soft one, and our TLS slice density hasn't been compared against
+    # theirs yet.
+    # Proportion of the fitted radius used for the inner-circle check: a fit
+    # is suspect if too many points end up *inside* a circle this much
+    # smaller than the fitted one (points bunched near the center rather
+    # than on the ring).
+    circle_diameter_proportion: float = 0.5
+    # Max points allowed inside the inner circle before the fit is flagged.
+    circle_inner_points_threshold: int = 5
+    # Max distance between points to be considered part of the same cluster
+    # when falling back to spatial clustering after a failed fit (isolates
+    # the stem ring from e.g. a branch/foliage cluster in the same slice).
+    circle_max_point_distance_m: float = 0.02
+    # Angular sectors the fitted ring is divided into, and how many must
+    # contain a point (within circle_sector_width_m of the fitted radius)
+    # for the fit to be considered well-covered.
+    circle_n_sectors: int = 16
+    circle_min_occupied_sectors: int = 9
+    circle_sector_width_m: float = 0.02
+    # Sanity floor on fitted radius -- distinct from min_valid_dbh_cm below,
+    # which rejects a whole *tree* later; this just rejects a degenerate
+    # near-zero fit at the single-slice level.
+    circle_min_radius_m: float = 0.02
     min_cci_for_valid_dbh: float = 0.3
-    # A least-squares circle fit to a sparse or near-collinear slice (e.g. a
-    # branch stub, or a stem partly occluded from the scanner) can converge
-    # on an enormous, physically impossible radius. No real tree stem
-    # exceeds this; reject fits above it rather than reporting nonsense.
+    # A circle fit to a sparse or near-collinear slice (e.g. a branch stub,
+    # or a stem partly occluded from the scanner) can converge on an
+    # enormous, physically impossible radius. No real tree stem exceeds
+    # this; reject fits above it rather than reporting nonsense.
     max_plausible_diameter_cm: float = 250.0
+    # tilt_detection (ported from dendromatics/sections.py): flags a
+    # section whose fitted circle *center* deviates too much from the
+    # tree's other section centers (e.g. the fit was pulled sideways by a
+    # branch cluster) -- a different failure mode than radius/coverage
+    # quality, which inner_circle/sector_occupancy alone can miss. Score is
+    # a weighted sum of absolute + relative tilt outlier flags, 0-1 scale;
+    # sections above this are treated as unreliable, same as low-CCI ones.
+    tilt_outlier_threshold: float = 0.5
     tree_height_percentile: float = 99.5
 
     # Tree-vs-not-a-tree classification. A segmented instance is only kept

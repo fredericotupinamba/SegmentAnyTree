@@ -26,7 +26,10 @@ from tupisat_inference.forest_metrics.visualization import (
     build_label_points,
 )
 
-TAPER_COLUMNS = ["tree_id", "height_m", "diameter_cm", "diameter_corrected_cm", "cci", "n_points", "center_x", "center_y"]
+TAPER_COLUMNS = [
+    "tree_id", "height_m", "diameter_cm", "cci", "n_points", "center_x", "center_y",
+    "tilt_outlier_prob", "diameter_corrected_cm",
+]
 
 REQUIRED_COLUMNS = ("X", "Y", "Z", "PredSemantic", "PredInstance")
 

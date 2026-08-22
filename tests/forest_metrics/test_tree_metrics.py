@@ -5,24 +5,25 @@ from tupisat_inference.forest_metrics.config import ForestMetricsConfig
 from tupisat_inference.forest_metrics.dtm import DTM
 from tupisat_inference.forest_metrics.tree_metrics import (
     apply_monotonic_correction,
-    fit_circle_ransac,
+    fit_circle_robust,
     measure_tree,
+    tilt_outlier_prob,
 )
 
 
-def _ring(xc, yc, r, n=200, noise=0.002, seed=0):
+def _ring(xc, yc, r, n=200, noise=0.002, seed=0, arc_deg=360.0):
     rng = np.random.default_rng(seed)
-    theta = rng.uniform(0, 2 * np.pi, n)
+    theta = rng.uniform(0, np.radians(arc_deg), n)
     x = xc + r * np.cos(theta) + rng.normal(0, noise, n)
     y = yc + r * np.sin(theta) + rng.normal(0, noise, n)
     return np.column_stack([x, y])
 
 
-def test_fit_circle_ransac_recovers_known_radius():
+def test_fit_circle_robust_recovers_known_radius():
     cfg = ForestMetricsConfig()
     points = _ring(xc=10.0, yc=-5.0, r=0.15, n=300)
 
-    xc, yc, r, cci = fit_circle_ransac(points, cfg, max_trials=cfg.dbh_ransac_max_trials)
+    xc, yc, r, cci = fit_circle_robust(points, cfg)
 
     assert np.isfinite(r)
     assert abs(r - 0.15) / 0.15 < 0.05
@@ -31,11 +32,11 @@ def test_fit_circle_ransac_recovers_known_radius():
     assert 0 <= cci <= 1
 
 
-def test_fit_circle_ransac_too_few_points_returns_nan():
+def test_fit_circle_robust_too_few_points_returns_nan():
     cfg = ForestMetricsConfig()
     points = np.array([[0.0, 0.0], [0.1, 0.0], [0.0, 0.1]])
 
-    xc, yc, r, cci = fit_circle_ransac(points, cfg, max_trials=cfg.dbh_ransac_max_trials)
+    xc, yc, r, cci = fit_circle_robust(points, cfg)
 
     assert np.isnan(r)
     assert np.isnan(xc)
@@ -43,13 +44,52 @@ def test_fit_circle_ransac_too_few_points_returns_nan():
     assert np.isnan(cci)
 
 
-def test_fit_circle_ransac_empty_input_returns_nan():
+def test_fit_circle_robust_empty_input_returns_nan():
     cfg = ForestMetricsConfig()
     points = np.zeros((0, 2))
 
-    xc, yc, r, cci = fit_circle_ransac(points, cfg, max_trials=cfg.dbh_ransac_max_trials)
+    xc, yc, r, cci = fit_circle_robust(points, cfg)
 
     assert np.isnan(r)
+
+
+def test_fit_circle_robust_recovers_stem_radius_despite_branch_noise():
+    """The scenario that motivated porting dendromatics' clustering
+    fallback: a clean stem ring plus a spatially separate cluster of
+    'branch' noise points caught in the same horizontal slice. A plain
+    least-squares fit over all points would be dragged off; fit_circle_check
+    should isolate the larger, coherent ring cluster and recover its
+    radius."""
+    cfg = ForestMetricsConfig()
+    ring_pts = _ring(xc=0.0, yc=0.0, r=0.15, n=250, noise=0.002)
+    rng = np.random.default_rng(2)
+    # A tight clump of "branch" points well outside the ring, on one side.
+    branch_pts = np.column_stack(
+        [rng.normal(0.5, 0.01, 40), rng.normal(0.5, 0.01, 40)]
+    )
+    points = np.vstack([ring_pts, branch_pts])
+
+    xc, yc, r, cci = fit_circle_robust(points, cfg)
+
+    assert np.isfinite(r)
+    assert abs(r - 0.15) / 0.15 < 0.1
+    assert abs(xc - 0.0) < 0.03
+    assert abs(yc - 0.0) < 0.03
+
+
+def test_tilt_outlier_prob_flags_sideways_center():
+    heights = np.array([0.5, 1.0, 1.5, 2.0, 2.5, 3.0, 3.5])
+    x_centers = np.zeros_like(heights)
+    y_centers = np.zeros_like(heights)
+    # One section's fitted center is pulled sideways, as if a branch
+    # cluster dragged the fit off the tree's actual axis.
+    y_centers[3] = 0.3
+    radii = np.full_like(heights, 0.15)
+
+    prob = tilt_outlier_prob(x_centers, y_centers, radii, heights)
+
+    assert prob[3] > 0
+    assert np.all(prob[[0, 1, 2, 4, 5, 6]] == 0)
 
 
 def _flat_dtm(z=0.0, extent=5.0, step=0.5):
@@ -114,13 +154,17 @@ def test_measure_tree_rejects_stem_thinner_than_min_valid_dbh():
 
 def test_measure_tree_rejects_partial_arc_plot_edge_fragment():
     cfg = ForestMetricsConfig()
-    # ~200 degrees of angular coverage, uniformly at every height -> CCI
+    # ~280 degrees of angular coverage, uniformly at every height -> CCI
     # comfortably above the 0.3 fit-sanity floor (so dbh_cm is a real
     # number, not NaN) but below the stricter 0.8 tree-validation bar at
     # every single slice -- a plausible plot-edge/occlusion fragment, never
     # accumulating the min_high_cci_slices consistent good readings a real
-    # trunk would.
-    tree_df = _cylinder_tree_df(radius_cm=15.0, z_top=12.0, arc_deg=200.0)
+    # trunk would. (dendromatics' sector_occupancy uses a fixed-width band
+    # around the fitted radius rather than a radius-proportional ring, so
+    # it's more sensitive to the fit bias a *very* partial arc -- e.g. 200
+    # degrees -- introduces; 280 degrees keeps the fit itself trustworthy
+    # while still failing the stricter validation bar.)
+    tree_df = _cylinder_tree_df(radius_cm=15.0, z_top=12.0, arc_deg=280.0)
 
     row, _ = measure_tree(4, tree_df, _flat_dtm(), cfg)
 
