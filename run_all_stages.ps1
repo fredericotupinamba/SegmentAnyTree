@@ -37,10 +37,23 @@ param(
     [string[]] $Only
 )
 
-$ErrorActionPreference = "Stop"
+# Deliberately NOT "Stop". In PowerShell 5.1 any line a native executable
+# writes to stderr becomes a terminating NativeCommandError under "Stop",
+# even when the command succeeded -- and docker writes plenty: "No such
+# container" from a cleanup rm, tqdm progress bars, numpy warnings. The
+# script checks $LASTEXITCODE explicitly instead, which is what actually
+# indicates failure.
+$ErrorActionPreference = "Continue"
 
 function Say($msg, $color = "White") {
     Write-Host ("[{0}] {1}" -f (Get-Date -Format "HH:mm:ss"), $msg) -ForegroundColor $color
+}
+
+function Remove-ContainerIfExists($name) {
+    # Checked rather than `docker rm -f ... 2>$null`: redirecting a native
+    # command's stderr in 5.1 is what triggers the problem above.
+    $existing = docker ps -aq --filter "name=^$name$"
+    if ($existing) { docker rm -f $name | Out-Null }
 }
 
 function Wait-Container($name) {
@@ -62,11 +75,12 @@ if (-not $SkipStage1) {
     # diameters. Refuse to run rather than hand back results that look fine.
     $probe = docker run --rm --entrypoint bash $SatImage -c `
         "grep -c crown_wood_frac_threshold /home/nibio/mutable-outside-world/tupisat_inference/forest_metrics/config.py"
+    if ($LASTEXITCODE -ne 0) { throw "could not inspect $SatImage (docker exit $LASTEXITCODE) -- is it built?" }
     if ([int]($probe | Select-Object -Last 1) -lt 1) {
         throw "$SatImage does not contain the current code. Rebuild first: docker build -f Dockerfile.pandas-fix -t $SatImage ."
     }
 
-    docker rm -f tupisat_all 2>$null | Out-Null
+    Remove-ContainerIfExists "tupisat_all"
     $forceFlag = @()
     if ($Force) { $forceFlag = @("--force") }
 
@@ -74,6 +88,7 @@ if (-not $SkipStage1) {
         --mount "type=bind,source=$InputDir,target=/home/nibio/mutable-outside-world/bucket_in_folder" `
         --mount "type=bind,source=$SatOut,target=/home/nibio/mutable-outside-world/bucket_out_folder" `
         $SatImage @forceFlag | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw "could not start stage 1 container (docker exit $LASTEXITCODE)" }
 
     Say "  container started; follow with: docker logs -f tupisat_all"
     $code = Wait-Container "tupisat_all"
@@ -110,7 +125,7 @@ if (-not $SkipStage2) {
             continue
         }
         Say ("  [{0}/{1}] {2}  ~7 min" -f $i, $plots.Count, $p.Stem)
-        docker rm -f ptw_run 2>$null | Out-Null
+        Remove-ContainerIfExists "ptw_run"
 
         # expandable_segments and --tta 1 are not tuning: without them this
         # stalls silently on a 16 GB card, with no exception and the
@@ -123,6 +138,10 @@ if (-not $SkipStage2) {
                 --preinstance-field PredInstance --region $Region `
                 --memory-fraction 0.45 --tta 1 --no-ptw-output `
                 --output ("/app/sat_data/05-PWOOD/$($p.Stem)_pwood.laz") | Out-Null
+        if ($LASTEXITCODE -ne 0) {
+            Say ("  ! could not start container for {0}; continuing" -f $p.Stem) "Red"
+            continue
+        }
 
         $code = Wait-Container "ptw_run"
         if ($code -ne 0) {
