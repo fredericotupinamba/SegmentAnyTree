@@ -52,6 +52,36 @@ base de copa precisa (a diferença é grande — veja a seção 3), leia até a 
 
 ---
 
+## 0.1 Atalho — rodar tudo de uma vez
+
+As três etapas para uma pasta inteira, num comando:
+
+```powershell
+cd E:\GITHUB\SegmentAnyTree
+.\run_all_stages.ps1
+```
+
+| flag | efeito |
+|---|---|
+| *(nenhuma)* | pula o que já terminou — seguro reexecutar após interrupção |
+| `-Force` | refaz tudo |
+| `-SkipStage1` | segmentação já feita, só madeira/folha + métricas |
+| `-Only P01,P02` | apenas as parcelas cujo nome contenha esses trechos |
+| `-InputDir`, `-SatOut`, `-PwoodDir`, `-MetricsDir` | caminhos alternativos |
+
+O script **recusa a rodar** se a imagem do TupiSAT não tiver o código atual
+(veja a seção 1), em vez de devolver resultados que parecem certos mas usam
+a regra de copa antiga. Uma parcela que falha não derruba as outras: o erro
+é registrado e a fila continua.
+
+**Tempo para 16 parcelas de 16 m numa RTX 4060 Ti:** ~6 h na etapa 1,
+~2 h na etapa 2, minutos na etapa 3 — cerca de **8 horas no total**.
+
+As seções abaixo explicam cada etapa individualmente, para quando você
+precisar rodar uma só, entender o que saiu, ou depurar.
+
+---
+
 ## 1. Etapa 1 — rodar o TupiSAT
 
 ### A imagem
