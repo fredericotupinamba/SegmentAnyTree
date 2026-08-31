@@ -81,13 +81,18 @@ if (-not $SkipStage1) {
     }
 
     Remove-ContainerIfExists "tupisat_all"
-    $forceFlag = @()
-    if ($Force) { $forceFlag = @("--force") }
+
+    # Stage 1 segments only. Its forest_metrics step cannot see wood/leaf
+    # labels -- PointsToWood has not run yet -- so anything it wrote would be
+    # recomputed by stage 3 and left behind as a second, less accurate set of
+    # CSVs in 04-OUTPUT, indistinguishable from the good ones in 06-METRICS.
+    $satArgs = @("--skip-forest-metrics")
+    if ($Force) { $satArgs += "--force" }
 
     docker run -d --gpus all --name tupisat_all `
         --mount "type=bind,source=$InputDir,target=/home/nibio/mutable-outside-world/bucket_in_folder" `
         --mount "type=bind,source=$SatOut,target=/home/nibio/mutable-outside-world/bucket_out_folder" `
-        $SatImage @forceFlag | Out-Null
+        $SatImage @satArgs | Out-Null
     if ($LASTEXITCODE -ne 0) { throw "could not start stage 1 container (docker exit $LASTEXITCODE)" }
 
     Say "  container started; follow with: docker logs -f tupisat_all"

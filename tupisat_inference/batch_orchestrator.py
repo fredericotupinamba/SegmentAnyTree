@@ -130,7 +130,8 @@ def safe_slug(file_id):
     return slug
 
 
-def process_one_file(file_id, source_path, output_dir, work_root, index, total, state):
+def process_one_file(file_id, source_path, output_dir, work_root, index, total, state,
+                      skip_forest_metrics=False):
     """Run the full single-file pipeline (ported from run_inference.sh),
     logging and checkpointing state at each step."""
     file_dir = os.path.join(work_root, safe_slug(file_id))
@@ -205,18 +206,30 @@ def process_one_file(file_id, source_path, output_dir, work_root, index, total, 
     segmented_las_path = os.path.join(sat_output_dir, os.path.basename(merged_las_path))
     shutil.move(merged_las_path, segmented_las_path)
 
-    step("forest_metrics")
-    try:
-        run_subprocess([sys.executable,
-                         os.path.join(REPO_ROOT, "tupisat_inference", "forest_metrics", "forest_metrics.py"),
-                         "--input-las", segmented_las_path,
-                         "--output-dir", sat_output_dir,
-                         "--stem", merged_stem])
-    except StepError as exc:
-        # A metrics-computation failure must not cost the user their already-
-        # produced segmented point cloud -- log and continue rather than abort.
-        log("WARN", idx=f"{index}/{total}", file=file_id, step="forest_metrics",
-            status="failed", msg=str(exc)[:500])
+    # Metrics here can only use the intensity+area crown rule, because the
+    # wood/leaf labels that make crown base accurate come from PointsToWood,
+    # which runs *after* this container. Anyone whose pipeline includes that
+    # step re-runs forest_metrics on its output and supersedes everything
+    # written here -- so computing it now costs minutes per plot and leaves
+    # a second, less accurate set of CSVs sitting beside the good ones,
+    # indistinguishable at a glance. --skip-forest-metrics leaves this
+    # container doing only what nothing downstream can redo: segmentation.
+    if skip_forest_metrics:
+        log("INFO", idx=f"{index}/{total}", file=file_id, step="forest_metrics",
+            status="skipped", msg="--skip-forest-metrics; run it after PointsToWood")
+    else:
+        step("forest_metrics")
+        try:
+            run_subprocess([sys.executable,
+                             os.path.join(REPO_ROOT, "tupisat_inference", "forest_metrics", "forest_metrics.py"),
+                             "--input-las", segmented_las_path,
+                             "--output-dir", sat_output_dir,
+                             "--stem", merged_stem])
+        except StepError as exc:
+            # A metrics-computation failure must not cost the user their already-
+            # produced segmented point cloud -- log and continue rather than abort.
+            log("WARN", idx=f"{index}/{total}", file=file_id, step="forest_metrics",
+                status="failed", msg=str(exc)[:500])
 
     step("finalize")
     if not os.listdir(sat_output_dir):
@@ -244,6 +257,11 @@ def main():
                          help="Abort the whole batch on the first failure instead of continuing.")
     parser.add_argument("--max-attempts", type=int, default=3,
                          help="Retries before a file is marked error_permanent.")
+    parser.add_argument("--skip-forest-metrics", action="store_true",
+                         help="Segment only. Use when PointsToWood runs next and "
+                              "forest_metrics will be re-run on its output -- the "
+                              "metrics this step would write are computed without "
+                              "wood/leaf labels and get superseded anyway.")
     args = parser.parse_args()
 
     if not os.path.isdir(args.input_dir):
@@ -279,7 +297,7 @@ def main():
 
         try:
             process_one_file(file_id, source_path, args.output_dir, args.work_dir,
-                              index, total, state)
+                              index, total, state, args.skip_forest_metrics)
             log("INFO", idx=f"{index}/{total}", file=file_id, step="done", status="done")
         except Exception as exc:  # noqa: BLE001 - a bad file must not kill the batch
             state.mark_failed(file_id, exc)

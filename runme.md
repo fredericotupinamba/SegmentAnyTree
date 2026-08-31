@@ -137,20 +137,20 @@ Acompanhe com `docker logs -f tupisat`.
 |---|---|
 | *(nenhuma)* | processa só o que ainda não terminou (retomável) |
 | `--force` | reprocessa tudo, ignorando o estado anterior |
+| `--skip-forest-metrics` | só segmenta — use quando o PointsToWood vem depois |
 | `--stop-on-error` | aborta o lote na primeira falha em vez de seguir |
 | `--max-attempts N` | tentativas antes de marcar o arquivo como falha permanente |
 
-**Resultado:** uma pasta `<nome>_SAT_output/` por nuvem de entrada, contendo:
+**Resultado:** uma pasta `<nome>_SAT_output/` por nuvem de entrada, com a
+nuvem segmentada `<nome>.laz` (`PredSemantic`, `PredInstance`).
 
-| arquivo | conteúdo |
-|---|---|
-| `<nome>.laz` | nuvem completa + `PredSemantic`, `PredInstance`, `IsCrown` |
-| `<nome>_tree_metrics.csv` | uma linha por árvore |
-| `<nome>_taper.csv` | uma linha por seção de diâmetro |
-| `<nome>_plot_summary.csv/json` | resumo da parcela |
-| `<nome>_tree_bases.laz` | marcadores na base de cada árvore |
-| `<nome>_diameter_circles.laz` | círculos ajustados, para inspeção visual |
-| `<nome>_tree_labels.laz` | rótulos com o id de cada árvore |
+Sem `--skip-forest-metrics`, a etapa 1 também calcula as métricas
+(`_tree_metrics.csv`, `_taper.csv`, `_plot_summary`, e os `.laz` de
+visualização) e grava `IsCrown` na nuvem. **Isso só faz sentido se você
+não for rodar o PointsToWood.** Se for, essas métricas usam a regra de
+copa antiga, são refeitas pela etapa 3, e ficam em `04-OUTPUT` parecidas
+com as boas de `06-METRICS` — foi por isso que o `run_all_stages.ps1`
+passa `--skip-forest-metrics`.
 
 Os 9 passos internos, na ordem, aparecem no log como `step=...`:
 `fix_naming` → `utm2local` → `prepare_eval_config` → `clear_cache` →
