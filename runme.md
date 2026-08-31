@@ -66,6 +66,8 @@ cd E:\GITHUB\SegmentAnyTree
 | *(nenhuma)* | pula o que já terminou — seguro reexecutar após interrupção |
 | `-Force` | refaz tudo |
 | `-SkipStage1` | segmentação já feita, só madeira/folha + métricas |
+| `-SkipStage4` | não gera as páginas por árvore (economiza horas e ~1 GB) |
+| `-Lang en\|pt\|es` | idioma das páginas da etapa 4 (padrão `en`) |
 | `-Only P01,P02` | apenas as parcelas cujo nome contenha esses trechos |
 | `-InputDir`, `-SatOut`, `-PwoodDir`, `-MetricsDir` | caminhos alternativos |
 
@@ -75,7 +77,10 @@ a regra de copa antiga. Uma parcela que falha não derruba as outras: o erro
 é registrado e a fila continua.
 
 **Tempo para 16 parcelas de 16 m numa RTX 4060 Ti:** ~6 h na etapa 1,
-~2 h na etapa 2, minutos na etapa 3 — cerca de **8 horas no total**.
+~2 h na etapa 2, minutos na etapa 3, e ~4 h na etapa 4 se você gerar a
+página de **todas** as árvores (~30 por parcela, ~30 s cada) — cerca de
+**12 horas no total**, ou 8 h com `-SkipStage4`. As páginas ocupam ~1,6 MB
+cada, algo como 800 MB no fim.
 
 As seções abaixo explicam cada etapa individualmente, para quando você
 precisar rodar uma só, entender o que saiu, ou depurar.
@@ -276,9 +281,14 @@ docker run --rm `
     --output-dir data/07-RELATORIO --dpi 200 --lang en
 ```
 
+Para a parcela inteira, troque `--tree-ids ...` por `--all-trees`. A nuvem
+é lida e o DTM reconstruído **uma vez por parcela**, não por árvore, então
+30 páginas custam muito menos que 30 execuções separadas.
+
 | flag | efeito |
 |---|---|
 | `--tree-ids` | lista de árvores (os `tree_id` do `tree_metrics.csv`) |
+| `--all-trees` | todas as árvores da parcela, em vez de uma lista |
 | `--lang` | `en` (padrão), `pt`, `es` |
 | `--dpi` | 200 gera ~3200×4200 px; 300 para impressão |
 

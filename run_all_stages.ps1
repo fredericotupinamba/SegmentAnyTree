@@ -23,12 +23,16 @@ param(
     [string] $SatOut     = "E:\GITHUB\SegmentAnyTree\data\04-OUTPUT",
     [string] $PwoodDir   = "E:\GITHUB\SegmentAnyTree\data\05-PWOOD",
     [string] $MetricsDir = "E:\GITHUB\SegmentAnyTree\data\06-METRICS",
+    [string] $ReportDir  = "E:\GITHUB\SegmentAnyTree\data\07-RELATORIO",
     [string] $SatImage   = "tupisat:latest",
     [string] $PtwImage   = "pointstowood:latest",
     [string] $Region     = "eu",
+    [ValidateSet("en","pt","es")]
+    [string] $Lang       = "en",
     [switch] $SkipStage1,
     [switch] $SkipStage2,
     [switch] $SkipStage3,
+    [switch] $SkipStage4,
     [switch] $Force,
     [string[]] $Only
 )
@@ -45,7 +49,9 @@ function Wait-Container($name) {
     return [int]$code
 }
 
-New-Item -ItemType Directory -Force -Path $PwoodDir, $MetricsDir | Out-Null
+# $SatOut is created here too: it is a bind-mount target for stage 1, and the
+# discovery below reads it even when stage 1 is skipped.
+New-Item -ItemType Directory -Force -Path $SatOut, $PwoodDir, $MetricsDir, $ReportDir | Out-Null
 
 # ---------------------------------------------------------------- stage 1
 if (-not $SkipStage1) {
@@ -163,7 +169,45 @@ if (-not $SkipStage3) {
     }
 }
 
+# ---------------------------------------------------------------- stage 4
+if (-not $SkipStage4) {
+    Say "STAGE 4  per-tree validation pages ($Lang)" "Cyan"
+    $i = 0
+    foreach ($p in $plots) {
+        $i++
+        $pwood = Join-Path $PwoodDir "$($p.Stem)_pwood.laz"
+        $metrics = Join-Path $MetricsDir "$($p.Stem)_tree_metrics.csv"
+        if (-not (Test-Path $pwood) -or -not (Test-Path $metrics)) {
+            Say ("  [{0}/{1}] {2}  metrics missing, skipping" -f $i, $plots.Count, $p.Stem) "Yellow"
+            continue
+        }
+        $nTrees = (Import-Csv $metrics | Measure-Object).Count
+        $existing = @(Get-ChildItem -Path $ReportDir -Filter "$($p.Stem)_tree*.png" -ErrorAction SilentlyContinue).Count
+        if ($existing -ge $nTrees -and -not $Force) {
+            Say ("  [{0}/{1}] {2}  {3} pages already there, skipping" -f $i, $plots.Count, $p.Stem, $existing)
+            continue
+        }
+        Say ("  [{0}/{1}] {2}  {3} trees, ~{4} min" -f $i, $plots.Count, $p.Stem, $nTrees, [math]::Ceiling($nTrees * 0.5))
+
+        # The cloud is read and the DTM built once for the whole plot, so
+        # --all-trees costs far less than one invocation per tree.
+        docker run --rm `
+            -v "${Root}:/w" -w /w -e PYTHONPATH=/w -e MPLCONFIGDIR=/tmp/mpl `
+            --entrypoint python3.8 $SatImage `
+            tupisat_inference/forest_metrics/tree_report.py `
+                --input-las ("data/05-PWOOD/$($p.Stem)_pwood.laz") `
+                --metrics-dir "data/06-METRICS" --stem $p.Stem `
+                --all-trees --output-dir "data/07-RELATORIO" --dpi 200 --lang $Lang
+        if ($LASTEXITCODE -ne 0) {
+            Say ("  ! {0} failed; continuing" -f $p.Stem) "Red"
+            continue
+        }
+        Say ("  [{0}/{1}] {2}  ok" -f $i, $plots.Count, $p.Stem) "Green"
+    }
+}
+
 Say "all done" "Green"
 Say "  segmented clouds : $SatOut"
 Say "  wood/leaf clouds : $PwoodDir"
 Say "  metrics          : $MetricsDir"
+Say "  report pages     : $ReportDir"

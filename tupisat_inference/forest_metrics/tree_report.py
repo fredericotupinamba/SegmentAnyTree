@@ -526,12 +526,19 @@ def main():
     p.add_argument("--input-las", required=True, help="Point cloud the metrics were computed from.")
     p.add_argument("--metrics-dir", required=True, help="Directory holding <stem>_taper.csv and <stem>_tree_metrics.csv.")
     p.add_argument("--stem", required=True)
-    p.add_argument("--tree-ids", required=True, nargs="+", type=int)
+    p.add_argument("--tree-ids", nargs="+", type=int,
+                    help="Trees to render. Omit and pass --all-trees for every tree in the plot.")
+    p.add_argument("--all-trees", action="store_true",
+                    help="Render every tree in <stem>_tree_metrics.csv. The point cloud is read "
+                         "and the DTM built once for the whole run, so this costs far less per "
+                         "tree than repeated single-tree invocations.")
     p.add_argument("--output-dir", required=True)
     p.add_argument("--dpi", type=int, default=200, help="Output resolution (default: %(default)s).")
     p.add_argument("--lang", default="en", choices=sorted(STRINGS),
                     help="Report language (default: %(default)s).")
     args = p.parse_args()
+    if not args.tree_ids and not args.all_trees:
+        p.error("pass --tree-ids, or --all-trees for every tree in the plot")
 
     cfg = ForestMetricsConfig()
     os.makedirs(args.output_dir, exist_ok=True)
@@ -550,7 +557,11 @@ def main():
         print(f"WARNING: {w}", flush=True)
 
     inst = df["PredInstance"].values
-    for tree_id in args.tree_ids:
+    tree_ids = args.tree_ids
+    if args.all_trees:
+        tree_ids = sorted(int(t) for t in metrics_all["tree_id"].unique())
+        print(f"Rendering all {len(tree_ids)} tree(s) in {args.stem}", flush=True)
+    for tree_id in tree_ids:
         rows = metrics_all[metrics_all["tree_id"] == tree_id]
         if rows.empty:
             print(f"tree {tree_id}: not in {args.stem}_tree_metrics.csv, skipping", flush=True)
