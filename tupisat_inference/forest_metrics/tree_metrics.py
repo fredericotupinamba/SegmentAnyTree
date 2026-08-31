@@ -276,15 +276,109 @@ def compute_height(hag: np.ndarray, cfg: ForestMetricsConfig) -> float:
     return float(np.nanpercentile(hag, cfg.tree_height_percentile))
 
 
+def _crown_base_from_wood_fraction(bin_idx, counts, is_wood, bin_edges, n_bins, cfg):
+    """Crown base from the per-bin wood fraction: the first run of
+    crown_wood_min_consecutive_bins trusted bins where under
+    crown_wood_frac_threshold of the points are wood, plus a fixed
+    offset. Returns NaN when no such run exists.
+
+    This is the accurate rule (0.71m cross-validated vs 1.09m for
+    intensity+area) but it needs a wood/leaf label per point, so it only
+    runs when the cloud has been through PointsToWood. See config.py."""
+    counts_wood = np.bincount(bin_idx[is_wood], minlength=n_bins)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        wood_frac = np.where(counts > 0, counts_wood / np.maximum(counts, 1), np.nan)
+
+    run = 0
+    run_start_bin = None
+    for i in range(n_bins):
+        if counts[i] < cfg.crown_wood_min_points_per_bin:
+            continue  # too few points to judge; skip without breaking the run
+        if wood_frac[i] < cfg.crown_wood_frac_threshold:
+            if run == 0:
+                run_start_bin = i
+            run += 1
+            if run >= cfg.crown_wood_min_consecutive_bins:
+                return float(bin_edges[run_start_bin]) + cfg.crown_wood_offset_m
+        else:
+            run = 0
+    return np.nan
+
+
+def _crown_base_from_intensity_area(bin_idx, counts, intensity, tree_xyz, bin_edges, n_bins, cfg):
+    """Crown base from all-point features: the first sustained run where
+    median intensity has dropped below crown_intensity_ratio_threshold of
+    the tree's own trunk baseline AND footprint area has grown past
+    crown_area_ratio_threshold of it. Returns NaN when no such run exists.
+
+    Fallback for clouds with no wood/leaf label."""
+    cell_x = np.floor(tree_xyz[:, 0] / cfg.crown_footprint_cell_m).astype(np.int64)
+    cell_y = np.floor(tree_xyz[:, 1] / cfg.crown_footprint_cell_m).astype(np.int64)
+
+    # Occupied-cell count per bin, vectorized: one np.unique call over
+    # (bin, cell_x, cell_y) triples for the whole tree, rather than a
+    # per-bin loop each calling np.unique(axis=0) on its own subset -- the
+    # per-bin version dominated this function's runtime on large real
+    # trees (up to ~2M points), since axis=0 uniqueness has real per-call
+    # overhead (sorting + structured-view construction) that a single
+    # combined pass avoids -- verified against real P02 data.
+    combined = np.column_stack([bin_idx, cell_x, cell_y])
+    unique_triples = np.unique(combined, axis=0)
+    area_m2 = np.bincount(unique_triples[:, 0], minlength=n_bins).astype(float) * (cfg.crown_footprint_cell_m ** 2)
+
+    intensity_median = np.full(n_bins, np.nan)
+    for i in range(n_bins):
+        sel = bin_idx == i
+        if np.any(sel):
+            intensity_median[i] = np.median(intensity[sel])
+
+    bin_mid = (bin_edges[:-1] + bin_edges[1:]) / 2
+    base_eligible = (bin_mid <= cfg.dbh_height_m) & (counts >= cfg.crown_baseline_min_points_per_bin)
+    if not np.any(base_eligible):
+        base_eligible = bin_mid <= cfg.dbh_height_m
+    if not np.any(base_eligible):
+        return np.nan
+
+    intensity0 = np.nanmedian(intensity_median[base_eligible])
+    area0 = np.median(area_m2[base_eligible])
+    if not np.isfinite(intensity0) or intensity0 <= 0 or not np.isfinite(area0) or area0 <= 0:
+        return np.nan
+
+    norm_intensity = intensity_median / intensity0
+    norm_area = area_m2 / area0
+
+    run = 0
+    run_start_bin = None
+    for i in range(n_bins):
+        if counts[i] < cfg.crown_min_points_per_bin:
+            continue  # too few points to trust this bin's value; skip without breaking the run
+        is_crown_bin = (
+            norm_intensity[i] < cfg.crown_intensity_ratio_threshold
+            and norm_area[i] > cfg.crown_area_ratio_threshold
+        )
+        if is_crown_bin:
+            if run == 0:
+                run_start_bin = i
+            run += 1
+            if run >= cfg.crown_min_consecutive_bins:
+                return float(bin_edges[run_start_bin])
+        else:
+            run = 0
+    return np.nan
+
+
 def compute_crown_metrics(
-    tree_xyz: np.ndarray, hag: np.ndarray, intensity: np.ndarray, tree_height: float, cfg: ForestMetricsConfig
+    tree_xyz: np.ndarray, hag: np.ndarray, intensity: np.ndarray, tree_height: float,
+    cfg: ForestMetricsConfig, is_wood: np.ndarray = None
 ) -> dict:
     """Finds crown_base_height_m by scanning height bins bottom-up for the
-    first sustained run where the bin's median LiDAR intensity has dropped
-    below crown_intensity_ratio_threshold of the tree's own trunk-baseline
-    intensity AND its horizontal footprint area has grown beyond
-    crown_area_ratio_threshold of the trunk-baseline footprint area. See
-    config.py for the real-data calibration this is based on."""
+    first sustained run of "this bin is crown", then derives the crown
+    geometry above it.
+
+    `is_wood` is a per-point boolean from a PointsToWood `prediction`
+    column, aligned with tree_xyz. When present the accurate wood-fraction
+    rule is used; when None the intensity+area fallback runs instead. See
+    config.py for the calibration behind both."""
     empty = {
         "crown_base_height_m": np.nan,
         "live_crown_ratio": np.nan,
@@ -314,68 +408,24 @@ def compute_crown_metrics(
     if counts.max() == 0:
         return empty
 
-    cell_x = np.floor(tree_xyz[:, 0] / cfg.crown_footprint_cell_m).astype(np.int64)
-    cell_y = np.floor(tree_xyz[:, 1] / cfg.crown_footprint_cell_m).astype(np.int64)
-
-    # Occupied-cell count per bin, vectorized: one np.unique call over
-    # (bin, cell_x, cell_y) triples for the whole tree, rather than a
-    # per-bin loop each calling np.unique(axis=0) on its own subset -- the
-    # per-bin version dominated this function's runtime on large real
-    # trees (up to ~2M points), since axis=0 uniqueness has real per-call
-    # overhead (sorting + structured-view construction) that a single
-    # combined pass avoids -- verified against real P02 data.
-    combined = np.column_stack([bin_idx, cell_x, cell_y])
-    unique_triples = np.unique(combined, axis=0)
-    area_m2 = np.bincount(unique_triples[:, 0], minlength=n_bins).astype(float) * (cfg.crown_footprint_cell_m ** 2)
-
-    intensity_median = np.full(n_bins, np.nan)
-    for i in range(n_bins):
-        sel = bin_idx == i
-        if np.any(sel):
-            intensity_median[i] = np.median(intensity[sel])
-
-    bin_mid = (bin_edges[:-1] + bin_edges[1:]) / 2
-    base_eligible = (bin_mid <= cfg.dbh_height_m) & (counts >= cfg.crown_baseline_min_points_per_bin)
-    if not np.any(base_eligible):
-        base_eligible = bin_mid <= cfg.dbh_height_m
-    if not np.any(base_eligible):
-        return empty
-
-    intensity0 = np.nanmedian(intensity_median[base_eligible])
-    area0 = np.median(area_m2[base_eligible])
-    if not np.isfinite(intensity0) or intensity0 <= 0 or not np.isfinite(area0) or area0 <= 0:
-        return empty
-
-    norm_intensity = intensity_median / intensity0
-    norm_area = area_m2 / area0
-
-    crown_base_bin = None
-    run = 0
-    run_start_bin = None
-    for i in range(n_bins):
-        if counts[i] < cfg.crown_min_points_per_bin:
-            continue  # too few points to trust this bin's value; skip without breaking the run
-        is_crown_bin = (
-            norm_intensity[i] < cfg.crown_intensity_ratio_threshold
-            and norm_area[i] > cfg.crown_area_ratio_threshold
+    if is_wood is not None:
+        crown_base_height = _crown_base_from_wood_fraction(
+            bin_idx, counts, is_wood, bin_edges, n_bins, cfg
         )
-        if is_crown_bin:
-            if run == 0:
-                run_start_bin = i
-            run += 1
-            if run >= cfg.crown_min_consecutive_bins:
-                crown_base_bin = run_start_bin
-                break
-        else:
-            run = 0
+    else:
+        crown_base_height = _crown_base_from_intensity_area(
+            bin_idx, counts, intensity, tree_xyz, bin_edges, n_bins, cfg
+        )
 
-    if crown_base_bin is None:
+    if not np.isfinite(crown_base_height):
         # No clear trunk -> crown transition found. Rather than guess with
         # a weaker fallback, report no crown split at all; measure_tree
         # falls back to the tree's full height.
         return empty
 
-    crown_base_height = bin_edges[crown_base_bin]
+    # The wood rule adds a fitted offset, which can push the answer past
+    # the treetop on a short tree; keep it inside the tree.
+    crown_base_height = min(crown_base_height, tree_height)
     empty["crown_base_height_m"] = float(crown_base_height)
     empty["live_crown_ratio"] = float((tree_height - crown_base_height) / tree_height)
 
@@ -404,14 +454,138 @@ def compute_crown_metrics(
     return empty
 
 
+def fit_stem_axis(heights, centers_x, centers_y, radii_m, cfg):
+    """Robust stem axis through the fitted section centres.
+
+    Theil-Sen rather than least squares because a handful of sections
+    centred on a branch would drag a least-squares line toward themselves;
+    Theil-Sen tolerates roughly 29% such sections. Refitted a few times,
+    dropping sections that sit far off the current estimate, so the axis
+    converges onto the stem rather than onto a compromise between the stem
+    and whatever was caught beside it.
+
+    Returns None when there are too few measured sections to define a line
+    -- callers then keep the unconstrained fit rather than inventing one.
+    """
+    from scipy.stats import theilslopes
+
+    valid = np.isfinite(centers_x) & np.isfinite(centers_y) & np.isfinite(radii_m) & (radii_m > 0)
+    if int(valid.sum()) < cfg.axis_min_sections:
+        return None
+
+    keep = valid.copy()
+    axis = None
+    for _ in range(max(1, cfg.axis_refit_iterations)):
+        if int(keep.sum()) < cfg.axis_min_sections:
+            break
+        h = heights[keep]
+        if np.ptp(h) <= 0:
+            break
+        sx = theilslopes(centers_x[keep], h)
+        sy = theilslopes(centers_y[keep], h)
+        axis = {"x0": float(sx[1]), "y0": float(sy[1]),
+                "dx": float(sx[0]), "dy": float(sy[0])}
+        pred_x, pred_y = axis_center_at(axis, heights)
+        residual = np.hypot(centers_x - pred_x, centers_y - pred_y)
+        tolerance = np.maximum(radii_m * cfg.axis_residual_radius_frac, cfg.axis_residual_floor_m)
+        new_keep = valid & (residual <= tolerance)
+        if int(new_keep.sum()) < cfg.axis_min_sections or np.array_equal(new_keep, keep):
+            keep = new_keep if int(new_keep.sum()) >= cfg.axis_min_sections else keep
+            break
+        keep = new_keep
+
+    if axis is None:
+        return None
+    pred_x, pred_y = axis_center_at(axis, heights)
+    axis["residual_m"] = np.hypot(centers_x - pred_x, centers_y - pred_y)
+    axis["on_axis"] = keep
+    axis["lean_deg"] = float(np.degrees(np.arctan(np.hypot(axis["dx"], axis["dy"]))))
+    return axis
+
+
+def axis_center_at(axis, height_m):
+    """Where the stem axis passes through a given height."""
+    return axis["x0"] + axis["dx"] * height_m, axis["y0"] + axis["dy"] * height_m
+
+
+def expected_radius_at(heights, radii_m, on_axis, target_h, cfg):
+    """Radius a section at `target_h` should have, from the on-axis
+    sections around it. Median over a height band rather than the whole
+    stem, so real taper is followed instead of flattened; falls back to the
+    whole stem when the band is empty."""
+    usable = on_axis & np.isfinite(radii_m) & (radii_m > 0)
+    if not np.any(usable):
+        return np.nan
+    near = usable & (np.abs(heights - target_h) <= cfg.axis_taper_window_m)
+    return float(np.median(radii_m[near if np.any(near) else usable]))
+
+
+def fit_circle_near_axis(slice_xy, center_pred, expected_radius_m, cfg):
+    """Circle fit restricted to the points that could belong to the stem:
+    those within a window around where the axis says the stem is. This is
+    what keeps a branch cluster out of the fit -- it sits well beyond the
+    window, so it is never offered to the fitter in the first place."""
+    if slice_xy.shape[0] == 0 or not np.isfinite(expected_radius_m):
+        return NAN_CIRCLE
+    window = max(expected_radius_m * cfg.axis_window_radius_factor, cfg.axis_window_min_m)
+    near = np.hypot(slice_xy[:, 0] - center_pred[0], slice_xy[:, 1] - center_pred[1]) <= window
+    if int(near.sum()) < cfg.min_points_for_taper_slice:
+        return NAN_CIRCLE
+    return fit_circle_robust(slice_xy[near], cfg)
+
+
+def fit_circle_cylinder_window(tree_xyz, hag, target_h, axis, expected_radius_m, cfg):
+    """Diameter from a vertical window instead of a thin slice.
+
+    Points in the window are de-leaned first -- each is shifted by the axis
+    displacement between its own height and the target -- so a leaning stem
+    projects onto a single circle rather than a smear. The fit is then
+    accepted only if the points supporting the ring span most of the
+    window's height: a stem does, a branch crossing the window does not,
+    which is the distinction a single 20 cm slice cannot make.
+    """
+    if not np.isfinite(expected_radius_m):
+        return NAN_CIRCLE
+    half = cfg.cylinder_window_m / 2
+    in_window = np.abs(hag - target_h) <= half
+    if int(in_window.sum()) < cfg.min_points_for_taper_slice:
+        return NAN_CIRCLE
+
+    pts = tree_xyz[in_window]
+    heights_in = hag[in_window]
+    dh = heights_in - target_h
+    projected = np.column_stack([pts[:, 0] - axis["dx"] * dh, pts[:, 1] - axis["dy"] * dh])
+
+    center_pred = axis_center_at(axis, target_h)
+    window = max(expected_radius_m * cfg.axis_window_radius_factor, cfg.axis_window_min_m)
+    near = np.hypot(projected[:, 0] - center_pred[0], projected[:, 1] - center_pred[1]) <= window
+    if int(near.sum()) < cfg.min_points_for_taper_slice:
+        return NAN_CIRCLE
+
+    xc, yc, r, cci = fit_circle_robust(projected[near], cfg)
+    if not np.isfinite(r) or r <= 0:
+        return NAN_CIRCLE
+
+    ring = np.abs(np.hypot(projected[near, 0] - xc, projected[near, 1] - yc) - r) <= cfg.cylinder_ring_tolerance_m
+    if not np.any(ring):
+        return NAN_CIRCLE
+    span = float(np.ptp(heights_in[near][ring]))
+    if span < cfg.cylinder_min_height_span_frac * cfg.cylinder_window_m:
+        return NAN_CIRCLE
+    return xc, yc, r, cci
+
+
 def compute_taper(tree_xyz: np.ndarray, hag: np.ndarray, max_height_m: float, cfg: ForestMetricsConfig) -> pd.DataFrame:
     """Samples diameter from taper_height_min_m up to max_height_m, which the
     caller should pass as the commercial/merchantable trunk height (e.g.
     crown_base_height_m), not the tree's full height -- crown diameters
     aren't meaningful trunk taper and shouldn't be measured or reported."""
-    columns = ["height_m", "diameter_cm", "cci", "n_points", "center_x", "center_y", "tilt_outlier_prob"]
+    columns = ["height_m", "diameter_cm", "cci", "n_points", "center_x", "center_y",
+                "tilt_outlier_prob", "axis_residual_m", "fit_source"]
     if not np.isfinite(max_height_m) or max_height_m <= cfg.taper_height_min_m:
-        return pd.DataFrame(columns=columns)
+        empty = pd.DataFrame(columns=columns)
+        empty.attrs["stem_axis"] = None
+        return empty
 
     heights = np.arange(cfg.taper_height_min_m, max_height_m, cfg.taper_height_increment_m)
     rows = []
@@ -433,14 +607,86 @@ def compute_taper(tree_xyz: np.ndarray, hag: np.ndarray, max_height_m: float, cf
             diameter_cm, cci, xc, yc = np.nan, np.nan, np.nan, np.nan
         rows.append((h, diameter_cm, cci, n_points, xc, yc, 0.0))
 
-    taper_df = pd.DataFrame(rows, columns=columns)
+    taper_df = pd.DataFrame(rows, columns=columns[:7])
+    taper_df["fit_source"] = np.where(taper_df["diameter_cm"].notna(), "slice", "none")
+
+    # --- stem axis, and the two passes that depend on it ----------------
+    # The first pass above is unconstrained: every point in the slice is
+    # offered to the fitter, so a branch beside the stem can capture the
+    # fit. Now that every section has a centre, the stem's own axis can be
+    # recovered and used to re-measure the sections that drifted off it.
+    heights_arr = taper_df["height_m"].to_numpy(dtype=float)
+    centers_x = taper_df["center_x"].to_numpy(dtype=float)
+    centers_y = taper_df["center_y"].to_numpy(dtype=float)
+    radii_m = taper_df["diameter_cm"].to_numpy(dtype=float) / 200.0
+
+    axis = fit_stem_axis(heights_arr, centers_x, centers_y, radii_m, cfg)
+    if axis is not None:
+        # A straight axis only describes a stem that mostly follows one.
+        # When few sections sit on it the fits are scattered (basal sweep,
+        # a fork, heavy occlusion), and correcting against it would move
+        # good sections onto a line that is not the stem.
+        measured = np.isfinite(radii_m) & (radii_m > 0)
+        support = axis["on_axis"].sum() / max(int(measured.sum()), 1)
+        if support < cfg.axis_min_support_frac:
+            axis = None
+    if axis is not None:
+        taper_df["axis_residual_m"] = axis["residual_m"]
+        tolerance = np.maximum(radii_m * cfg.axis_residual_radius_frac, cfg.axis_residual_floor_m)
+        # A section is retried when it drifted off the axis, and also when
+        # the first pass could not measure it at all -- the axis often
+        # rescues those too, since the reason for the failure is usually
+        # the same clutter.
+        # Too far from the axis, or not measured at all, or measured but
+        # implausibly fat for its neighbourhood.
+        expected_r_all = np.array([
+            expected_radius_at(heights_arr, radii_m, axis["on_axis"], h, cfg)
+            for h in heights_arr
+        ])
+        too_fat = (np.isfinite(expected_r_all) & np.isfinite(radii_m)
+                    & (radii_m > expected_r_all * cfg.axis_radius_outlier_factor))
+        needs_retry = (~axis["on_axis"]) | ~np.isfinite(radii_m) | (radii_m <= 0) | too_fat
+
+        for i in np.flatnonzero(needs_retry):
+            h = heights_arr[i]
+            expected_r = expected_radius_at(heights_arr, radii_m, axis["on_axis"], h, cfg)
+            if not np.isfinite(expected_r):
+                continue
+            center_pred = axis_center_at(axis, h)
+            slice_xy = tree_xyz[np.abs(hag - h) <= half, :2]
+
+            xc, yc, r, cci = fit_circle_near_axis(slice_xy, center_pred, expected_r, cfg)
+            source = "axis"
+            if not np.isfinite(r) or r <= 0 or cci < cfg.min_cci_for_valid_dbh:
+                # Layer 3: the thin slice still cannot separate stem from
+                # branch, so widen it into a vertical window and require
+                # the fit to be cylindrically coherent through it.
+                xc, yc, r, cci = fit_circle_cylinder_window(
+                    tree_xyz, hag, h, axis, expected_r, cfg)
+                source = "cylinder"
+
+            plausible = (np.isfinite(r) and r > 0
+                          and cfg.axis_refit_min_radius_frac * expected_r <= r
+                          <= cfg.axis_refit_max_radius_frac * expected_r)
+            if plausible and cci >= cfg.min_cci_for_valid_dbh:
+                taper_df.loc[i, ["diameter_cm", "cci", "center_x", "center_y"]] = [
+                    2 * r * 100, cci, xc, yc]
+                taper_df.loc[i, "fit_source"] = source
+            else:
+                taper_df.loc[i, ["diameter_cm", "center_x", "center_y"]] = np.nan
+                taper_df.loc[i, "fit_source"] = "rejected_off_axis"
+    else:
+        taper_df["axis_residual_m"] = np.nan
 
     # tilt_detection (ported from dendromatics): a section whose fitted
     # center is off-axis relative to the tree's other sections is a
     # different failure mode than poor radial coverage -- the fit can look
     # numerically fine (good CCI) while being centered on e.g. a branch
-    # cluster rather than the stem. Needs every section's center at once,
-    # so it runs as a second pass after the per-height loop above.
+    # cluster rather than the stem. Kept as a second, independent check:
+    # it scores tilt against vertical, so it catches trees the axis fit
+    # never got enough sections to model, but on a leaning stem every
+    # section looks tilted and the real outlier does not stand out -- which
+    # is why the axis residual above is the primary test, not this.
     radius_cm = taper_df["diameter_cm"].to_numpy(dtype=float) / 2
     radius_cm = np.nan_to_num(radius_cm, nan=0.0)
     tilt_prob = tilt_outlier_prob(
@@ -453,7 +699,9 @@ def compute_taper(tree_xyz: np.ndarray, hag: np.ndarray, max_height_m: float, cf
 
     tilt_flagged = tilt_prob > cfg.tilt_outlier_threshold
     taper_df.loc[tilt_flagged, ["diameter_cm", "center_x", "center_y"]] = np.nan
+    taper_df.loc[tilt_flagged, "fit_source"] = "rejected_tilt"
 
+    taper_df.attrs["stem_axis"] = axis
     return taper_df
 
 
@@ -534,6 +782,10 @@ def measure_tree(
 
     tree_xyz = tree_df[["X", "Y", "Z"]].values
     intensity = tree_df["intensity"].values
+    # PointsToWood writes `prediction` as a float (0.0 leaf / 1.0 wood),
+    # not a flag. Absent on clouds that never went through it -- then
+    # compute_crown_metrics falls back to its intensity+area rule.
+    is_wood = (tree_df["prediction"].values >= 0.5) if "prediction" in tree_df.columns else None
     n_points = int(tree_xyz.shape[0])
     if n_points < cfg.min_points_per_tree:
         flags.append("too_few_points")
@@ -553,7 +805,7 @@ def measure_tree(
             flags.append("no_dbh_slice")
 
     height_m = compute_height(hag, cfg)
-    crown = compute_crown_metrics(tree_xyz, hag, intensity, height_m, cfg)
+    crown = compute_crown_metrics(tree_xyz, hag, intensity, height_m, cfg, is_wood)
     is_crown_point = (
         hag >= crown["crown_base_height_m"] if np.isfinite(crown["crown_base_height_m"]) else np.zeros(n_points, dtype=bool)
     )
@@ -585,6 +837,37 @@ def measure_tree(
     # that row itself won't appear in the reported taper.
     sampling_height_m = min(max(commercial_height_m, cfg.tree_validation_height_m), height_m)
     full_taper_df = compute_taper(tree_xyz, hag, sampling_height_m, cfg)
+    stem_axis = full_taper_df.attrs.get("stem_axis")
+
+    # DBH was measured before the stem axis existed, so it got the same
+    # unconstrained fit every other section got. Now that the axis is
+    # known, re-measure breast height against it: a branch at 1.3 m can
+    # capture the fit exactly as it can higher up, and DBH feeds tree
+    # validation, the conic volume and every downstream stand statistic.
+    if stem_axis is not None:
+        heights_arr = full_taper_df["height_m"].to_numpy(dtype=float)
+        radii_m = full_taper_df["diameter_cm"].to_numpy(dtype=float) / 200.0
+        expected_r = expected_radius_at(heights_arr, radii_m, stem_axis["on_axis"],
+                                         cfg.dbh_height_m, cfg)
+        if np.isfinite(expected_r):
+            center_pred = axis_center_at(stem_axis, cfg.dbh_height_m)
+            dbh_half = cfg.dbh_slice_thickness_m / 2
+            dbh_xy = tree_xyz[np.abs(hag - cfg.dbh_height_m) <= dbh_half, :2]
+            xc, yc, r, cci = fit_circle_near_axis(dbh_xy, center_pred, expected_r, cfg)
+            # Only ever *rescue* DBH, never overwrite a measurement that
+            # already succeeded: breast height is the best-scanned slice on
+            # the tree, and the axis is a weaker authority there than the
+            # points themselves.
+            dbh_was_bad = not np.isfinite(dbh["dbh_cm"])
+            plausible = (np.isfinite(r) and r > 0
+                          and cfg.axis_refit_min_radius_frac * expected_r <= r
+                          <= cfg.axis_refit_max_radius_frac * expected_r)
+            if dbh_was_bad and plausible and cci >= cfg.min_cci_for_valid_dbh:
+                dbh = {"dbh_cm": 2 * r * 100, "dbh_cci": cci,
+                        "dbh_n_points": int(dbh_xy.shape[0]), "dbh_x": xc, "dbh_y": yc}
+                if "no_dbh_slice" in flags or "low_cci" in flags:
+                    flags = [f for f in flags if f not in ("no_dbh_slice", "low_cci")]
+
     full_taper_df = apply_monotonic_correction(full_taper_df, cfg)
 
     taper_df = full_taper_df[full_taper_df["height_m"] <= commercial_height_m].reset_index(drop=True)
@@ -623,6 +906,7 @@ def measure_tree(
         "is_valid_tree": is_valid_tree,
         "quality_flags": ";".join(flags),
     }
+    row["stem_lean_deg"] = float(stem_axis["lean_deg"]) if stem_axis else np.nan
     row.update(dbh)
     row.update(crown)
 

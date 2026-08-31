@@ -26,3 +26,7 @@
 /helios_for_instance/
 /Stefano/
 
+# 6.9 GB of training data that no COPY in any Dockerfile uses -- without
+# this the whole thing is shipped to the docker daemon as build context on
+# every build, for nothing.
+/TrainingDataset/

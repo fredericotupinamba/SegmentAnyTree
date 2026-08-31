@@ -105,26 +105,37 @@ class ForestMetricsConfig:
     min_valid_dbh_cm: float = 7.0
 
     # Crown metrics. crown_base_height_m is found by a bottom-up scan of
-    # height bins, looking for the first sustained run where LiDAR
-    # intensity has dropped relative to the tree's own trunk baseline AND
-    # the horizontal footprint area has grown relative to it. Calibrated
-    # against 58 real, visually-labeled crown base heights across two
-    # plots (P01/P02): mean absolute error 1.26m fit on all 58 trees,
-    # 1.29m/1.53m under leave-one-plot-out cross-validation, vs. 3.37m for
-    # the point-density-only heuristic this replaced (a densely-scanned
-    # TLS tree can have roughly uniform point density top to bottom, so
-    # density alone finds false transitions partway up the trunk).
-    # Intensity separates real trunk (bark) from foliage far better than
-    # local point geometry -- a from-scratch sphericity-based classifier
-    # was tried first and found to not discriminate wood from foliage at
-    # all on this real data (near-identical distributions in both
-    # regions); intensity showed a real, consistent gap (trunk-base
-    # median 2.7-4.4x higher than crown-top median across sample trees).
-    # A third condition (point density above its own trunk baseline) was
-    # tested too -- it also increases into the crown, but adding it as a
-    # requirement was not consistently better across the two calibration
-    # plots (helped one direction of cross-validation, hurt the other),
-    # so it's left out in favor of the simpler two-feature rule.
+    # height bins for the first sustained run of "this bin is crown".
+    # There are two rules for deciding that, and which one runs depends on
+    # whether the point cloud carries a PointsToWood wood/leaf label:
+    #
+    #   wood/leaf (preferred, needs a `prediction` column)
+    #     A bin is crown once the fraction of its points classified as
+    #     wood drops below crown_wood_frac_threshold. One feature, no
+    #     normalisation, no intensity.
+    #
+    #   intensity+area (fallback, all-point features)
+    #     A bin is crown once its median LiDAR intensity has dropped
+    #     below crown_intensity_ratio_threshold of the tree's own
+    #     trunk baseline AND its horizontal footprint area has grown
+    #     past crown_area_ratio_threshold of that baseline.
+    #
+    # Both are calibrated against the same 58 visually-labeled crown base
+    # heights across P01/P02 (tupisat_inference/forest_metrics/
+    # calibration/), scored by leave-one-plot-out cross-validation:
+    #
+    #   wood/leaf        0.71m  (0.66 / 0.76 per fold, 46/58 within 1m)
+    #   intensity+area   1.09m  (1.22 / 0.96 per fold, 39/58 within 1m)
+    #   density-only     3.37m  (the heuristic both of these replaced)
+    #
+    # Why one feature beats several: with leaves removed, a bare bole is
+    # ~100% wood and a crown bin is ~0% wood (median wood fraction 0.999
+    # vs 0.000, AUC 0.990), so nothing else needs to be measured. Adding
+    # the wood footprint area or its horizontal spread to the rule made
+    # it *worse* (1.06m / 1.08m) and cut coverage to 0.84-0.91, because
+    # in the crown there is barely any wood left to have an area or a
+    # spread -- wood does not fan out above the crown base, it vanishes.
+    # A 3-feature logistic regression tied but did not beat it (0.75m).
     crown_height_bin_m: float = 0.25
     # Horizontal grid cell size for the footprint-area proxy: number of
     # occupied cells at this resolution x cell area, not a convex hull --
@@ -150,6 +161,22 @@ class ForestMetricsConfig:
     crown_min_consecutive_bins: int = 5
     crown_voxel_size_m: float = 0.25
 
+    # Wood/leaf rule (used when the cloud has a `prediction` column).
+    # A bin counts as crown once under half its points are wood...
+    crown_wood_frac_threshold: float = 0.5
+    # ...sustained for this many consecutive bins (6 x 0.25m = 1.5m), long
+    # enough that one gap in the bole cannot trigger it.
+    crown_wood_min_consecutive_bins: int = 6
+    # Added to the height the run starts at. The wood fraction crosses its
+    # threshold ~1m *below* where an annotator marks the crown base: the
+    # transition is gradual (~3.1m wide per tree, 0.9->0.1 wood fraction),
+    # so the two conventions pick different points on the same ramp. This
+    # is a fixed property of the rule, fitted on training trees only --
+    # applying it took cross-validated error from 1.09m to 0.71m.
+    crown_wood_offset_m: float = 1.0
+    # Minimum points in a bin to judge its wood fraction at all.
+    crown_wood_min_points_per_bin: int = 10
+
     # Taper / volume. No fixed max height: sampling always stops at each
     # tree's own measured height. 0.1 + n*0.2 lands exactly on 1.3m (DBH
     # height), so the taper grid always includes a sample at breast height
@@ -158,6 +185,68 @@ class ForestMetricsConfig:
     taper_height_increment_m: float = 0.2
     taper_slice_thickness_m: float = 0.2
     min_points_for_taper_slice: int = 8
+
+    # Stem axis. An unconstrained circle fit sees every point in the slice,
+    # so a branch caught alongside the stem can pull the fit off the stem
+    # entirely and still score well on coverage -- the inflated circle is
+    # round precisely because it spans both. Measured on P01/P02: 8.6% of
+    # all sections (232 of 2688) sit with their centre off the stem, across
+    # 68% of trees, and those sections read a median 36.8 cm against 28.2 cm
+    # for on-axis ones -- always too large, never too small.
+    #
+    # The axis is fitted with Theil-Sen (robust to ~29% outliers) rather
+    # than assumed vertical, because leaning is the norm, not the exception:
+    # median lean 3.0 degrees, p90 5.2, max 13.4, with 63% of trees past 2
+    # degrees. A vertical-axis test would reject the *good* fits on those.
+    # This is also why tilt_outlier_prob misses these sections -- it scores
+    # tilt against vertical, so on a leaning tree every section looks tilted
+    # and the real outlier does not stand out (the 7.5m section of the tree
+    # that motivated this scored 0.38 against a 0.5 threshold).
+    axis_min_sections: int = 6
+    axis_refit_iterations: int = 3
+    # A section is off-axis when its centre lies further from the fitted
+    # axis than this fraction of its own radius (floored, so a thin stem
+    # high in the tree is not judged by a couple of centimetres).
+    axis_residual_radius_frac: float = 0.8
+    axis_residual_floor_m: float = 0.10
+    # Refit window: points beyond this multiple of the expected radius from
+    # the axis-predicted centre are not part of the stem at that height.
+    axis_window_radius_factor: float = 1.6
+    axis_window_min_m: float = 0.12
+    # A section can sit close to the axis and still be wrong: a circle
+    # stretched to span stem *and* branch stays roughly centred while
+    # reading far too large, so the centre residual alone never flags it
+    # (its tolerance scales with the inflated radius). Retry any section
+    # reading more than this multiple of the radius its neighbours suggest.
+    axis_radius_outlier_factor: float = 1.5
+    # A constrained refit is only believed when its radius lands in this
+    # band around the expected one. Outside it the window did not isolate
+    # the stem -- it clipped it (reading far too small) or still spans the
+    # clutter (too large). Verified on real data: without this floor, a
+    # section whose axis prediction was 27 cm off the true stem came back
+    # as a confident 10.2 cm on a 35 cm stem, which is worse than the
+    # inflated reading it replaced. Failing to a *missing* measurement is
+    # safe; the monotonic correction interpolates it.
+    axis_refit_min_radius_frac: float = 0.70
+    axis_refit_max_radius_frac: float = 1.40
+    # The axis is only trusted to re-measure anything when this fraction of
+    # the tree's measured sections actually lie on it. A stem whose fits are
+    # mostly scattered has no reliable axis to correct against, and forcing
+    # one there does damage rather than repair.
+    axis_min_support_frac: float = 0.5
+    # Half-width of the height band used to estimate a section's expected
+    # radius from the on-axis sections around it.
+    axis_taper_window_m: float = 1.5
+
+    # Cylinder pass. For sections the axis-constrained refit still cannot
+    # measure, the slice is widened into a vertical window and de-leaned
+    # along the axis before fitting. A branch occupies only part of the
+    # window's height, so requiring the points that support the fitted ring
+    # to span most of it rejects branches that a single thin slice cannot
+    # tell from stem.
+    cylinder_window_m: float = 0.6
+    cylinder_ring_tolerance_m: float = 0.04
+    cylinder_min_height_span_frac: float = 0.55
     log_assortments: List[LogAssortment] = field(default_factory=_default_log_assortments)
 
     # Stand-level.

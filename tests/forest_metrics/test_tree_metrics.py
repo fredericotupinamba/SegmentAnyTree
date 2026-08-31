@@ -5,7 +5,11 @@ from tupisat_inference.forest_metrics.config import ForestMetricsConfig
 from tupisat_inference.forest_metrics.dtm import DTM
 from tupisat_inference.forest_metrics.tree_metrics import (
     apply_monotonic_correction,
+    axis_center_at,
+    fit_circle_cylinder_window,
+    fit_circle_near_axis,
     fit_circle_robust,
+    fit_stem_axis,
     measure_tree,
     tilt_outlier_prob,
 )
@@ -338,3 +342,181 @@ def test_measure_tree_taper_stops_below_full_height_when_crown_detected():
     assert is_crown_point.shape[0] == len(tree_df)
     assert not is_crown_point[: len(trunk)].any()  # trunk points never flagged as crown
     assert is_crown_point[len(trunk):].mean() > 0.5  # most of the synthetic crown scatter is flagged
+
+
+def _wood_leaf_tree_df(trunk_top_m=8.0, tree_top_m=14.0, seed=0):
+    """A bole of pure wood points topped by a leaf-dominated crown -- the
+    real pattern the wood-fraction rule keys off. On real calibration data
+    a bare bole bins at ~99.9% wood and a crown bin at ~0% (see config.py),
+    so the crown here is given a small wood minority (branches) rather than
+    none, to keep the fixture honest about what the rule must tolerate."""
+    rng = np.random.default_rng(seed)
+    trunk = _cylinder_tree_df(radius_cm=15.0, z_top=trunk_top_m, points_per_ring=40, ring_spacing_m=0.05)
+    trunk["prediction"] = 1.0
+
+    n_crown = 8000
+    crown = pd.DataFrame(
+        np.column_stack([
+            rng.uniform(-1.5, 1.5, n_crown),
+            rng.uniform(-1.5, 1.5, n_crown),
+            rng.uniform(trunk_top_m, tree_top_m, n_crown),
+        ]),
+        columns=["X", "Y", "Z"],
+    )
+    crown["intensity"] = 10000.0  # same as the trunk: only the wood/leaf label may drive the split
+    crown["prediction"] = (rng.random(n_crown) < 0.15).astype(float)
+    return pd.concat([trunk, crown], ignore_index=True), len(trunk)
+
+
+def test_crown_base_uses_wood_fraction_when_prediction_present():
+    """With a wood/leaf label the crown base comes from the wood fraction
+    alone. Intensity is deliberately identical in trunk and crown here, so
+    the intensity+area fallback could not find this transition at all --
+    only the wood label can."""
+    cfg = ForestMetricsConfig()
+    tree_df, n_trunk = _wood_leaf_tree_df(trunk_top_m=8.0, tree_top_m=14.0)
+
+    row, _taper_df, is_crown_point = measure_tree(1, tree_df, _flat_dtm(), cfg)
+
+    # The rule fires where wood drops off (8.0m) and adds its fitted
+    # offset, so the answer sits near 8.0 + crown_wood_offset_m.
+    assert abs(row["crown_base_height_m"] - (8.0 + cfg.crown_wood_offset_m)) < 1.0
+    assert is_crown_point.shape[0] == len(tree_df)
+    assert not is_crown_point[:n_trunk].any()
+
+
+def test_crown_base_falls_back_when_prediction_absent():
+    """Same geometry without the label: the wood rule cannot run, so the
+    intensity+area fallback takes over. It finds no transition on this
+    constant-intensity fixture, which is the honest outcome -- reporting
+    NaN rather than guessing (measure_tree then uses the full height)."""
+    cfg = ForestMetricsConfig()
+    tree_df, _ = _wood_leaf_tree_df(trunk_top_m=8.0, tree_top_m=14.0)
+    tree_df = tree_df.drop(columns=["prediction"])
+
+    row, _taper_df, is_crown_point = measure_tree(1, tree_df, _flat_dtm(), cfg)
+
+    assert np.isnan(row["crown_base_height_m"])
+    assert not is_crown_point.any()
+
+
+def test_crown_base_offset_cannot_exceed_tree_height():
+    """The fitted offset is added to the run's start height, so on a short
+    tree whose wood gives out near the top it could otherwise land above
+    the treetop -- crown_base_height_m must stay inside the tree."""
+    cfg = ForestMetricsConfig()
+    tree_df, _ = _wood_leaf_tree_df(trunk_top_m=5.0, tree_top_m=5.6)
+
+    row, _taper_df, _is_crown = measure_tree(1, tree_df, _flat_dtm(), cfg)
+
+    if np.isfinite(row["crown_base_height_m"]):
+        assert row["crown_base_height_m"] <= row["height_m"]
+
+
+def _leaning_sections(lean_dx=0.05, lean_dy=0.02, radius_m=0.15, n=20):
+    """Section centres along a leaning stem, plus their radii."""
+    heights = np.arange(0.1, 0.1 + 0.2 * n, 0.2)
+    cx = 100.0 + lean_dx * heights
+    cy = 200.0 + lean_dy * heights
+    return heights, cx, cy, np.full(heights.shape, radius_m)
+
+
+def test_fit_stem_axis_recovers_lean():
+    """The axis must be fitted, not assumed vertical: most real stems lean
+    (median 3 degrees on the calibration plots), and a vertical assumption
+    would read every section of a leaning tree as off-axis."""
+    cfg = ForestMetricsConfig()
+    heights, cx, cy, radii = _leaning_sections(lean_dx=0.05, lean_dy=0.02)
+
+    axis = fit_stem_axis(heights, cx, cy, radii, cfg)
+
+    assert axis is not None
+    assert abs(axis["dx"] - 0.05) < 1e-6
+    assert abs(axis["dy"] - 0.02) < 1e-6
+    assert axis["on_axis"].all()
+    px, py = axis_center_at(axis, 5.0)
+    assert abs(px - (100.0 + 0.05 * 5.0)) < 1e-3
+    assert abs(py - (200.0 + 0.02 * 5.0)) < 1e-3
+
+
+def test_fit_stem_axis_ignores_sections_captured_by_a_branch():
+    """A few sections centred on a branch must not drag the axis -- that is
+    the whole reason for a robust (Theil-Sen) fit over least squares."""
+    cfg = ForestMetricsConfig()
+    heights, cx, cy, radii = _leaning_sections()
+    cx[12:15] += 0.6  # three sections pulled onto a branch
+
+    axis = fit_stem_axis(heights, cx, cy, radii, cfg)
+
+    assert axis is not None
+    assert abs(axis["dx"] - 0.05) < 1e-3
+    assert not axis["on_axis"][12:15].any()
+
+
+def test_fit_circle_near_axis_excludes_branch_cluster():
+    """The failure this whole path exists for: a branch beside the stem in
+    the same slice. Unconstrained, the fit spans both and reads far too
+    large; constrained to the axis window it recovers the stem."""
+    cfg = ForestMetricsConfig()
+    stem = _ring(100.0, 200.0, 0.14, n=260)
+    branch = _ring(100.42, 200.0, 0.10, n=200, seed=3)
+    # A bridge of points joining the two: a branch is attached to the stem,
+    # so single-linkage clustering (fit_circle_check's existing fallback)
+    # cannot split them. With a detached branch that fallback already
+    # succeeds, and this path would never be needed.
+    bridge = np.column_stack([
+        np.linspace(100.13, 100.33, 40),
+        np.full(40, 200.0) + np.random.default_rng(7).normal(0, 0.004, 40),
+    ])
+    both = np.vstack([stem, branch, bridge])
+
+    _, _, r_free, _ = fit_circle_robust(both, cfg)
+    _, _, r_axis, _ = fit_circle_near_axis(both, (100.0, 200.0), 0.14, cfg)
+
+    assert np.isfinite(r_axis)
+    assert abs(r_axis - 0.14) < 0.02
+    # The unconstrained fit is the one being repaired: it must not already
+    # be right, or this test would prove nothing.
+    assert not np.isfinite(r_free) or abs(r_free - 0.14) > abs(r_axis - 0.14)
+
+
+def test_cylinder_window_rejects_a_branch_that_does_not_span_it():
+    """Layer 3's discriminator: stem points fill the vertical window, a
+    branch crossing it occupies only a thin band of height. Same points in
+    plan view, different answer."""
+    cfg = ForestMetricsConfig()
+    axis = {"x0": 100.0, "y0": 200.0, "dx": 0.0, "dy": 0.0}
+    rng = np.random.default_rng(0)
+
+    ring = _ring(100.0, 200.0, 0.14, n=400)
+    stem_z = rng.uniform(4.7, 5.3, ring.shape[0])  # spans the whole window
+    stem = np.column_stack([ring, stem_z])
+
+    ring_b = _ring(100.0, 200.0, 0.14, n=400, seed=5)
+    flat_z = rng.uniform(4.98, 5.02, ring_b.shape[0])  # a thin slab only
+    slab = np.column_stack([ring_b, flat_z])
+
+    _, _, r_stem, _ = fit_circle_cylinder_window(
+        stem, stem[:, 2], 5.0, axis, 0.14, cfg)
+    _, _, r_slab, _ = fit_circle_cylinder_window(
+        slab, slab[:, 2], 5.0, axis, 0.14, cfg)
+
+    assert np.isfinite(r_stem) and abs(r_stem - 0.14) < 0.02
+    assert not np.isfinite(r_slab)
+
+
+def test_axis_refit_never_reports_a_clipped_stem():
+    """A refit whose window missed the stem returns a small arc, which fits
+    a small circle very convincingly. Accepting that would replace a value
+    that is too large with one that is too small -- worse, because it looks
+    plausible. The plausibility band must reject it."""
+    cfg = ForestMetricsConfig()
+    stem = _ring(100.0, 200.0, 0.20, n=400)
+
+    # Predicted centre 0.30 m off the true stem: the window catches an arc.
+    _, _, r, _ = fit_circle_near_axis(stem, (100.30, 200.0), 0.20, cfg)
+
+    if np.isfinite(r):
+        assert not (cfg.axis_refit_min_radius_frac * 0.20 <= r
+                     <= cfg.axis_refit_max_radius_frac * 0.20), (
+            "a clipped-stem fit landed inside the plausibility band")

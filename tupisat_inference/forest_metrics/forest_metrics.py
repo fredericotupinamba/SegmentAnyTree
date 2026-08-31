@@ -30,10 +30,15 @@ from tupisat_inference.forest_metrics.visualization import (
 
 TAPER_COLUMNS = [
     "tree_id", "height_m", "diameter_cm", "cci", "n_points", "center_x", "center_y",
-    "tilt_outlier_prob", "diameter_corrected_cm",
+    "tilt_outlier_prob", "axis_residual_m", "fit_source", "diameter_corrected_cm",
 ]
 
 REQUIRED_COLUMNS = ("X", "Y", "Z", "intensity", "PredSemantic", "PredInstance")
+
+# Written by PointsToWood (0.0 = leaf, 1.0 = wood). Optional: without it
+# compute_crown_metrics falls back to its intensity+area rule, which is
+# less accurate (1.09m vs 0.71m cross-validated) but needs no extra input.
+OPTIONAL_COLUMNS = ("prediction",)
 
 
 class ForestMetrics(object):
@@ -64,7 +69,12 @@ class ForestMetrics(object):
         # gps_time, rgb, ...); a 90M-point file loaded at full width can peak
         # at tens of GB. Drop everything but what this module needs before
         # doing any further work.
-        df = df[list(REQUIRED_COLUMNS)].copy()
+        present_optional = [c for c in OPTIONAL_COLUMNS if c in df.columns]
+        df = df[list(REQUIRED_COLUMNS) + present_optional].copy()
+        if "prediction" in present_optional:
+            self._log("Found PointsToWood wood/leaf labels -- using the wood-fraction crown rule")
+        else:
+            self._log("No 'prediction' column -- falling back to the intensity+area crown rule")
 
         non_tree_df = df[df["PredSemantic"] == 0]
         tree_pts_df = df[(df["PredSemantic"] == 1) & (df["PredInstance"] > 0)]

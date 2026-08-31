@@ -182,3 +182,11 @@ check_list.info
 *.png
 *.csv
 !tupisat-social-preview.png
+
+# Manually-labeled crown base heights (58 trees, P01/P02) -- the ground
+# truth the CBH model is fit and cross-validated against. Irreplaceable
+# without re-annotating by hand, so it must survive the blanket *.csv rule.
+!tupisat_inference/forest_metrics/calibration/*.csv
+
+# 6.9 GB of FOR-instance training data -- fetched, not authored here.
+/TrainingDataset/
