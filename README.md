@@ -38,16 +38,10 @@ docker run -it --rm --gpus all \
 
 `Dockerfile.pandas-fix` is a thin patch layer on top of the original SegmentAnyTree image (`docker pull maciekwielgosz/segment-any-tree:latest`) — it fixes a broken pandas/scikit-learn install in that image and adds the resumable batch pipeline and forest metrics module. If you'd rather build everything from scratch instead of patching the upstream image, use `Dockerfile` (or `Dockerfile_cuda_11.8.0` for CUDA 11.8, less tested).
 
-In order to run code using docker container you should edit the content of `run_docker_locally.sh` file. You should change the following lines:
-```
-docker run -it --gpus all \
-    --name $CONTAINER_NAME \
-    --mount type=bind,source=/path/to/your/bucket_in_folder,target=/home/nibio/mutable-outside-world/bucket_in_folder \
-    --mount type=bind,source=/path/to/your/bucket_out_folder,target=/home/nibio/mutable-outside-world/bucket_out_folder \
-    $IMAGE_NAME
-```
-
-You should change the mounting folders to match your local folders where you keep your point cloud files (las, ply, laz or zip) to be processed, then run it: `bash run_docker_locally.sh` and expect the results in your output folder.
+The Quick start command above is the whole thing — just point `source=` at
+your own input/output folders. For the full pipeline (wood/leaf separation,
+dendrometric metrics, per-tree validation reports) and everything specific
+to this fork, see [`runme.md`](runme.md).
 
 ### Batch processing, resuming and progress
 
@@ -80,61 +74,6 @@ Each processed point cloud gets its own `<name>_SAT_output/` folder (mirroring F
 - `<name>_diameter_circles.laz`, `<name>_tree_labels.laz`, `<name>_tree_bases.laz` — point-cloud visualizations viewable in any point cloud viewer (CloudCompare, etc.).
 
 Since SegmentAnyTree's semantic head is binary (tree / non-tree, no dedicated ground class), a DTM is derived from the non-tree points via a Cloth Simulation Filter. Tunables (RANSAC thresholds, log assortments, crown density thresholds, etc.) live in `tupisat_inference/forest_metrics/config.py` and can be overridden per run with `--config-json`.
-
-## Inference
-This section explains how to use the inference script (`run_inference.sh`) to process data and manage the output. This is to be used if you do not run using docker container.
-Follow the steps below for successful execution. 
-
-### Steps to Use the Script
-
-1. **Set Up Environment**:
-   - The script defines the working directory (`WORK_DIR`) and ensures all necessary modules are accessible by updating the `PYTHONPATH`. No changes are needed unless the working directory path must be modified.
-   ```bash
-   WORK_DIR='/home/nibio/mutable-outside-world'
-   export PYTHONPATH=$WORK_DIR:$PYTHONPATH
-   ```
-
-2. **Provide Input Parameters**:
-   - The script requires three parameters to run:
-     1. **SOURCE_DIR**: The input directory with files to process.
-     2. **DEST_DIR**: The output directory where results will be saved.
-     3. **CLEAN_OUTPUT_DIR**: Set to `true` or `false` to decide if the output directory should be cleaned before execution.
-
-   - If no parameters are provided, default values are used:
-   ```bash
-   SOURCE_DIR="$WORK_DIR/data_for_test"
-   DEST_DIR="$WORK_DIR/data_for_test_results"
-   CLEAN_OUTPUT_DIR=true
-   ```
-
-3. **Run the Script**:
-   - To execute the script, use the following command:
-   ```bash
-   bash run_inference.sh <path_to_input_dir> <path_to_output_dir> <clean_output_dir>
-   ```
-
-4. **Cleaning the Output Directory**:
-   - If `CLEAN_OUTPUT_DIR` is set to `true`, the script will remove existing contents from the output directory before processing.
-
-5. **File Preparation**:
-   - The script copies input files to an `input_data` folder in the output directory to avoid modifying the original files:
-   ```bash
-   cp -r "$SOURCE_DIR/"* "$DEST_DIR/input_data/"
-   ```
-
-6. **Run Python Scripts**:
-   - The script runs multiple Python scripts for tasks like updating the `eval.yaml` file, renaming files, and performing UTM normalization. These scripts are called sequentially to ensure correct data preparation.
-
-7. **Inference Execution**:
-   - After preparing the files, the script runs the inference pipeline with this command:
-   ```bash
-   bash large_PC_predict.sh "$DEST_DIR"
-   ```
-
-8. **Post-Processing and Results**:
-   - After inference, the script processes and renames output files, stores them in a `final_results` folder, and counts the number of result files generated:
- 
-
 
 ## Training
 Please follow the command to train the model.

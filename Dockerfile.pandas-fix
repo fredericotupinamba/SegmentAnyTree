@@ -66,12 +66,13 @@ ENV PYTHONUNBUFFERED=1
 # (non-resumable, no per-file state/progress). batch_state.py,
 # batch_orchestrator.py and forest_metrics/ (a new pipeline step -- runs
 # after "merge", before "finalize", see batch_orchestrator.py) all came in
-# with the bulk tupisat_inference/ copy above; only the two entry-point
-# shell scripts need copying separately here.
+# with the bulk tupisat_inference/ copy above; only the entry-point shell
+# script needs copying separately here. (run_batch_inference.sh used to be
+# copied here too -- it was the pre-orchestrator single-file entry point,
+# superseded by batch_orchestrator.py and never called from anywhere in the
+# image; removed along with the file itself.)
 COPY run_batch_pipeline.sh /home/nibio/mutable-outside-world/run_batch_pipeline.sh
-COPY run_batch_inference.sh /home/nibio/mutable-outside-world/run_batch_inference.sh
-RUN chmod +x /home/nibio/mutable-outside-world/run_batch_pipeline.sh \
-    /home/nibio/mutable-outside-world/run_batch_inference.sh
+RUN chmod +x /home/nibio/mutable-outside-world/run_batch_pipeline.sh
 
 # Wrap the real entrypoint with a background heartbeat that independently
 # logs GPU state every 30s, so liveness can be confirmed from `docker logs`
